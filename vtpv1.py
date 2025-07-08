@@ -3,6 +3,7 @@ import re
 import random
 import requests
 import anthropic
+import os
 from flask import Flask, request, jsonify
 
 # Logging configuration
@@ -10,11 +11,11 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 app = Flask(__name__)
 app.logger.setLevel(logging.DEBUG)
 
-# Configuration (replace with your actual credentials)
-CLAUDE_API_KEY = "sk-ant-..."
-CLAUDE_MODEL = "claude-3-7-sonnet-20250219"
-WASSENGER_API_KEY = "YOUR_WASSENGER_API_KEY"  # Wassenger Token
-WASSENGER_GROUP_ID = "120363400132223227@g.us"  # Your group WID
+# Configuration from environment variables
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
+WASSENGER_API_KEY = os.getenv("WASSENGER_API_KEY")
+WASSENGER_GROUP_ID = os.getenv("WASSENGER_GROUP_ID")
 
 # Booking intent keywords
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
@@ -59,25 +60,19 @@ SPIN_HISTORY = {}  # phone -> list of {'speaker','text'}
 # Initialize Claude client
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
-# Detect language
 def detect_language(text):
     return 'zh' if re.search(r'[\u4e00-\u9fff]', text) else 'en'
 
-# Simplify splitter
 def split_message(text, max_parts=3):
     return [text.strip()]
 
-# Send WhatsApp reply via Wassenger
 def send_whatsapp_reply(to, text):
     url = "https://api.wassenger.com/v1/messages"
     headers = {
         "Content-Type": "application/json",
         "Token": WASSENGER_API_KEY
     }
-    if "@" in to:
-        payload = {"group": to, "message": text}
-    else:
-        payload = {"phone": to, "message": text}
+    payload = {"phone": to, "message": text} if "@" not in to else {"group": to, "message": text}
     try:
         resp = requests.post(url, json=payload, headers=headers)
         resp.raise_for_status()
@@ -85,19 +80,17 @@ def send_whatsapp_reply(to, text):
     except Exception as e:
         app.logger.error(f"Send error to {to}: {e}")
 
-# Notify team on booking handover
 def notify_handover(phone, msg):
     note = f"[Handover] 客户 {phone} 提了预约: {msg}"
     send_whatsapp_reply(WASSENGER_GROUP_ID, note)
 
-# Generate next reply via Claude
 def generate_claude_reply(phone, user_msg):
     history = SPIN_HISTORY.setdefault(phone, [])
     history.append({'speaker': 'user', 'text': user_msg})
 
     messages = []
     for turn in history:
-        role = 'user' if turn['speaker']=='user' else 'assistant'
+        role = 'user' if turn['speaker'] == 'user' else 'assistant'
         messages.append({'role': role, 'content': turn['text']})
 
     response = claude_client.messages.create(
@@ -108,69 +101,71 @@ def generate_claude_reply(phone, user_msg):
     )
     raw = response.content
     reply = ''.join(getattr(p, 'text', str(p)) for p in raw) if isinstance(raw, list) else str(raw)
-    reply = reply.strip().replace('您','你')
+    reply = reply.strip().replace('您', '你')
 
-    history.append({'speaker':'assistant','text':reply})
+    history.append({'speaker': 'assistant', 'text': reply})
     idx = SPIN_STATE.get(phone, 0)
-    if SPIN_STAGES[idx]['role'] in ['question','close']:
+    if SPIN_STAGES[idx]['role'] in ['question', 'close']:
         SPIN_STATE[phone] = idx + 1
 
     return split_message(reply)
 
-# Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
     payload = request.get_json(force=True) or {}
     app.logger.debug(f"Incoming Wassenger payload: {payload}")
 
     if payload.get('event') != 'message:in:new':
-        return jsonify({'status':'ignored'}), 200
+        return jsonify({'status': 'ignored'}), 200
     data = payload.get('data', {})
     if data.get('meta', {}).get('isGroup'):
-        return jsonify({'status':'group_ignored'}), 200
+        return jsonify({'status': 'group_ignored'}), 200
 
-    phone = data.get('fromNumber') or data.get('from','').split('@')[0]
-    msg = data.get('body','').strip()
+    phone = data.get('fromNumber') or data.get('from', '').split('@')[0]
+    msg = data.get('body', '').strip()
     if not phone or not msg:
-        return jsonify({'status':'ignored'}), 200
+        return jsonify({'status': 'ignored'}), 200
 
-    # Booking override
     if any(k.lower() in msg.lower() for k in BOOKING_KEYWORDS):
         notify_handover(phone, msg)
-        ack = ('好的，马上帮你转接，请稍等~' if detect_language(msg)=='zh' else 'Sure, connecting you now.')
+        ack = ('好的，马上帮你转接，请稍等~' if detect_language(msg) == 'zh' else 'Sure, connecting you now.')
         for part in split_message(ack):
             send_whatsapp_reply(phone, part)
-        return jsonify({'status':'handover'}), 200
+        return jsonify({'status': 'handover'}), 200
 
-    # Link handling first-step
-    if URL_PATTERN.search(msg) and SPIN_STATE.get(phone, 0) == 0:
-        link = URL_PATTERN.search(msg).group()
-        lang = detect_language(msg)
-        analysis_prompt = (
-            f"请根据SWOT分析这个网站：{link}，并给出简要概述。" if lang=='zh' else
-            f"Please analyze this website: {link} based on the SWOT framework and provide a brief summary."
-        )
-        resp = claude_client.messages.create(
-            model=CLAUDE_MODEL,
-            system=SYSTEM_PROMPT,
-            messages=[{'role':'user','content':analysis_prompt}],
-            max_tokens=200
-        )
-        raw = resp.content
-        text = ''.join(getattr(p,'text',str(p)) for p in raw) if isinstance(raw, list) else str(raw)
-        text = text.strip().replace('您','你')
-        for part in split_message(text):
-            send_whatsapp_reply(phone, part)
-        ask = ('现在在用哪些平台做推广？' if lang=='zh' else 'Which platforms are you currently using?')
-        SPIN_STATE[phone] = 1
-        for part in split_message(ask):
-            send_whatsapp_reply(phone, part)
-        return jsonify({'status':'ok'}), 200
+    try:
+        if URL_PATTERN.search(msg) and SPIN_STATE.get(phone, 0) == 0:
+            link = URL_PATTERN.search(msg).group()
+            lang = detect_language(msg)
+            analysis_prompt = (
+                f"请根据SWOT分析这个网站：{link}，并给出简要概述。" if lang == 'zh' else
+                f"Please analyze this website: {link} based on the SWOT framework and provide a brief summary."
+            )
+            resp = claude_client.messages.create(
+                model=CLAUDE_MODEL,
+                system=SYSTEM_PROMPT,
+                messages=[{'role': 'user', 'content': analysis_prompt}],
+                max_tokens=200
+            )
+            raw = resp.content
+            text = ''.join(getattr(p, 'text', str(p)) for p in raw) if isinstance(raw, list) else str(raw)
+            text = text.strip().replace('您', '你')
+            for part in split_message(text):
+                send_whatsapp_reply(phone, part)
+            ask = ('现在在用哪些平台做推广？' if lang == 'zh' else 'Which platforms are you currently using?')
+            SPIN_STATE[phone] = 1
+            for part in split_message(ask):
+                send_whatsapp_reply(phone, part)
+            return jsonify({'status': 'ok'}), 200
 
-    # Normal SPIN flow
-    for part in generate_claude_reply(phone, msg):
-        send_whatsapp_reply(phone, part)
-    return jsonify({'status':'ok'}), 200
+        for part in generate_claude_reply(phone, msg):
+            send_whatsapp_reply(phone, part)
+        return jsonify({'status': 'ok'}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error in processing message: {e}")
+        send_whatsapp_reply(phone, "Sorry, something went wrong while processing your message.")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 @app.route('/', methods=['GET'])
 def health_check():
