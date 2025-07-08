@@ -107,9 +107,29 @@ def generate_claude_reply(phone, user_msg):
 def webhook():
     payload = request.get_json(force=True) or {}
     # Log entire request body for debugging
-    app.logger.info("Wassenger payload received:\n%s", json.dumps(payload, indent=2, ensure_ascii=False))
+    app.logger.info("Wassenger payload received:
+%s", json.dumps(payload, indent=2, ensure_ascii=False))
 
+    # Only handle new incoming messages
     if payload.get('event') != 'message:in:new':
+        return jsonify({'status':'ignored'}), 200
+    data = payload.get('data', {})
+
+    # Handle group messages: forward or process as needed
+    if data.get('meta', {}).get('isGroup'):
+        group_name = data.get('chat', {}).get('name', '<group>')
+        author = data.get('author', '')
+        msg_body = data.get('body', '').strip()
+        app.logger.info(f"Group message from {group_name} by {author}: {msg_body}")
+        # Forward the group message to your admin group
+        send_whatsapp_reply(WASSENGER_GROUP_ID, f"[Group:{group_name}] {author}: {msg_body}")
+        return jsonify({'status':'group_forwarded'}), 200
+
+    # Extract sender and message
+    phone = data.get('fromNumber') or data.get('from', '').split('@')[0]
+    msg = data.get('body', '').strip()
+    if not phone or not msg:
+        return jsonify({'status':'ignored'}), 200
         return jsonify({'status':'ignored'}), 200
     data = payload.get('data',{})
     if data.get('meta',{}).get('isGroup'):
