@@ -19,7 +19,7 @@ AIRTABLE_PAT = os.getenv("AIRTABLE_PAT")
 AIRTABLE_BASE_ID = "appUkjxuY1a5HSSC3"
 AIRTABLE_TABLE_NAME = "CustomerHistory"
 AIRTABLE_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
-AIRTABLE_HEADERS = {"Authorization": f"Bearer {AIRTABLE_PAT}"}
+AIRTABLE_HEADERS = {"Authorization : Bearer" {AIRTABLE_PAT}"}
 
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
 URL_PATTERN = re.compile(r'https?://\\S+')
