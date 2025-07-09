@@ -21,101 +21,10 @@ AIRTABLE_TABLE_NAME = "CustomerHistory"
 AIRTABLE_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
 AIRTABLE_HEADERS = {"Authorization": f"Bearer {AIRTABLE_PAT}"}
 
-
-
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
-URL_PATTERN = re.compile(r'https?://\\S+')
+URL_PATTERN = re.compile(r'https?://\S+')
 
-SYSTEM_PROMPT = """
-<instructions>
-You are Coco, Ventopia’s WhatsApp Sales Assistant. Your goal is to close deals using SPIN selling while leveraging Ventopia’s full suite of marketing packages and internal SWOT insights.
-
-When a customer mentions marketing, packages, promotion, Ventopia, etc., do the following:
-
-1. Situation & Problem
-   • Greet based on customer texting language and provide intro if its a new customer
-   • Ask Which area are you exploring today—e-commerce, TikTok, F&B, social media, website/Google Ads, store-visit videos, or WeChat commerce platform
-
-2. Implication & Need-Payoff
-   • Based on their answer, present exactly one package using this structure:
-     - Package Name
-     - Key Features (bullet points)
-     - Price & Term
-   • If they reply I’m not sure or 0, present the All-Inclusive Social & Digital Marketing Suite overview
-
-3. Guide to Close
-   • Mirror customer tone, split into 2–3 short messages
-   • End with Does this fit your needs Should I share a case study or suggest a custom combo
-
-4. Style Rules
-   • Language follow customer last replied language
-   • Always use you, never 您
-   • Steer toward booking or next steps; avoid endless open-ended questions
-</instructions>
-
-<SWOT>
-Strengths: tiered pricing; in-house expertise; strong Xiaohongshu reach
-Weaknesses: basic tier excludes TikTok; higher tiers may deter micro-SMEs; multi-platform management is complex
-Opportunities: rapid TikTok ad growth; Xiaohongshu commerce boom; clear upsell paths
-Threats: algorithm changes; competitor bundles; content fatigue
-</SWOT>
-
-<Packages>
-1. E-Commerce Package (Shopee & Lazada)
-   - New account setup, store activation, product listing, livestream support
-   - RM 5,888 / month (min 3 months)
-
-2. TikTok-Focused Suite
-   - All-in-One (TikTok + Shopee + Lazada): 15-20 videos + livestream — RM 13,888 / month
-   - Full-Service TikTok: ads, account manager, 15-20 edits — RM 6,888 / month
-   - Entry-Level TikTok + WhatsApp: 2-3 edits + ads — RM 3,888 / month
-   - Basic TikTok Kick-Start: 15-20 videos + livestream — RM 9,888 / month
-
-3. F&B Full-House Plan
-   - Standard (3 months): 1 video + 1 note / month + 4 FB / IG posts + ads — RM 5,888
-   - PRO MAX (3 months): 2 videos + 2 notes / month + 8 FB / IG posts + ads — RM 8,888
-
-4. One-Stop Social & Digital
-   - Xiaohongshu: design, copy, 3 influencer notes — RM 2,288 / month
-   - FB & IG: design, ads, manager — RM 3,000 / month
-   - Website Design: custom pages, SEO, modules — RM 2,500 (one-time)
-   - Google Ads & SEO: keywords, mini-site, ads, tracking — RM 2,500 / month
-   - Store-Visit Video: filming, talent, script, editing — RM 1,888 (one-time)
-
-5. Platform Dev
-   - WeChat Commerce: distributor mall, order & commission backend — RM 50,000 (one-time)
-</Packages>
-
-<OutputStyle>
-• Split your answer into 2–3 separate messages
-• Use concise bullets for features
-• Always end with a closing question
-</OutputStyle>
-
-<ExampleInteraction>
-User: I want to learn about your marketing packages.
-Assistant Msg 1:
-Hi there! I’m Coco from Ventopia. Which area are you exploring today—
-1) E-commerce
-2) TikTok
-3) F&B
-4) Social media
-5) Website/Google Ads
-6) Store-Visit videos
-7) WeChat Commerce
-
-User: 2
-Assistant Msg 2:
-Sure—here’s our Full-Service TikTok package:
-• Ad management & dedicated account manager
-• Marketing strategy & scripting
-• 15-20 video edits per month
-RM 6,888 / month
-
-Assistant Msg 3:
-Does this fit your needs Should I share a quick case study or suggest a custom combo
-</ExampleInteraction>
-"""
+SYSTEM_PROMPT = """<instructions> … your full system prompt … </instructions>"""
 
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
@@ -144,35 +53,67 @@ def notify_handover(phone, msg):
     send_whatsapp_reply(WASSENGER_GROUP_ID, note)
 
 def fetch_airtable_history(phone):
-    params = {"filterByFormula": f"{{Phone}} = '{phone}'", "sort[0][field]": "Timestamp", "sort[0][direction]": "desc", "maxRecords": 10}
+    phone = phone.lstrip('+')
+    params = {
+        "filterByFormula": f"{{Phone}} = '{phone}'",
+        "sort[0][field]": "LastUpdated",
+        "sort[0][direction]": "desc",
+        "maxRecords": 1
+    }
     try:
         resp = requests.get(AIRTABLE_URL, headers=AIRTABLE_HEADERS, params=params)
         resp.raise_for_status()
         records = resp.json().get("records", [])
-        return [{"speaker": r['fields'].get("Speaker", "user"), "text": r['fields'].get("Message", "")} for r in reversed(records)]
+        if not records:
+            return []
+        history_text = records[0]['fields'].get("History", "")
+        history_lines = history_text.split("\\n")
+        history = []
+        for line in history_lines:
+            if line.startswith("Customer:"):
+                history.append({"speaker": "user", "text": line.replace("Customer:", "").strip()})
+            elif line.startswith("Bot:"):
+                history.append({"speaker": "assistant", "text": line.replace("Bot:", "").strip()})
+        return history
     except Exception as e:
         app.logger.error(f"Failed to fetch Airtable history: {e}")
         return []
 
-def save_message_to_airtable(phone, speaker, text):
-    data = {"fields": {"Phone": phone, "Speaker": speaker, "Message": text}}
+def save_message_to_airtable(phone, history_text):
+    data = {
+        "fields": {
+            "Phone": phone,
+            "History": history_text,
+            "LastUpdated": ""  # let Airtable auto-fill current time if you have formula field
+        }
+    }
     try:
         requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data).raise_for_status()
     except Exception as e:
         app.logger.error(f"Failed to save message to Airtable: {e}")
 
 def generate_claude_reply(phone, user_msg):
-    save_message_to_airtable(phone, "user", user_msg)
     history = fetch_airtable_history(phone)
-    if not history:
+    history.append({"speaker": "user", "text": user_msg})
+
+    if len(history) == 1:  # only user_msg just appended
         lang = detect_language(user_msg)
         intro = ("Hi there! I’m Coco from Ventopia. Which area are you exploring today—\n1) E-commerce\n2) TikTok\n3) F&B\n4) Social media\n5) Website/Google Ads\n6) Store-Visit videos\n7) WeChat Commerce" if lang == 'en' else "你好！我是 Ventopia 的 Coco，请问你今天想了解哪方面的服务呢？\n1) 电商\n2) TikTok\n3) 餐饮\n4) 社交媒体\n5) 网站/谷歌广告\n6) 到店视频\n7) 微信商城")
+        save_message_to_airtable(phone, f"Customer: {user_msg}\\nBot: {intro}")
         return split_message(intro)
 
     messages = [{"role": 'user' if h['speaker']=='user' else 'assistant', "content": h['text']} for h in history]
     response = claude_client.messages.create(model=CLAUDE_MODEL, system=SYSTEM_PROMPT, messages=messages, max_tokens=8192)
     reply = ''.join(getattr(p, 'text', str(p)) for p in response.content).strip().replace('您', '你')
-    save_message_to_airtable(phone, "assistant", reply)
+
+    # Rebuild history_text for Airtable
+    history_text = ""
+    for h in history:
+        prefix = "Customer" if h['speaker'] == 'user' else "Bot"
+        history_text += f"{prefix}: {h['text']}\\n"
+    history_text += f"Bot: {reply}"
+
+    save_message_to_airtable(phone, history_text)
     return split_message(reply)
 
 @app.route('/webhook', methods=['POST'])
@@ -186,7 +127,7 @@ def webhook():
     if data.get('meta', {}).get('isGroup'):
         return jsonify({'status': 'group_ignored'}), 200
 
-    phone = data.get('fromNumber') or data.get('from', '').split('@')[0]
+    phone = (data.get('fromNumber') or data.get('from', '').split('@')[0]).lstrip('+')
     msg = data.get('body', '').strip()
     if not phone or not msg:
         return jsonify({'status': 'ignored'}), 200
