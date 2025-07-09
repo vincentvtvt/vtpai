@@ -1,6 +1,7 @@
 import logging
 import re
 import os
+import time
 import requests
 import anthropic
 from flask import Flask, request, jsonify
@@ -24,7 +25,7 @@ AIRTABLE_HEADERS = {"Authorization": f"Bearer {AIRTABLE_PAT}"}
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
 URL_PATTERN = re.compile(r'https?://\\S+')
 
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = """<instructions> 
 <instructions> 
 你是 Angela，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
 
@@ -95,7 +96,7 @@ Google Ads & SEO：关键词、迷你站、广告、追踪 — RM 2,500 / 月
 </OutputStyle> 
 
 <ExampleInteraction> 
-User: I want to learn about your marketing packages. Assistant Msg 1: Hi there! 我是 Ventopia 的 Coco。你今天想了解哪个领域— 1) 电商 2) TikTok 3) 餐饮 4) 社交媒体 5) 网站/Google 广告 6) 到店视频 7) 微信商城
+User: I want to learn about your marketing packages. Assistant Msg 1: 你今天想了解哪个领域— 1) 电商 2) TikTok 3) 餐饮 4) 社交媒体 5) 网站/Google 广告 6) 到店视频 7) 微信商城
 User: 2
 Assistant Msg 2:
 好的—这是我们的 TikTok 全方位运营套餐：
@@ -107,17 +108,13 @@ RM 6,888 / 月
 Assistant Msg 3:
 这个符合你的需求吗？需要我分享一个案例还是建议定制组合？
 </ExampleInteraction>
-"""
+</instructions>"""
 
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
 
 def detect_language(text):
     return 'zh' if re.search(r'[\u4e00-\u9fff]', text) else 'en'
-
-
-def split_message(text):
-    return [text.strip()]
 
 
 def send_whatsapp_reply(to, text):
@@ -131,16 +128,23 @@ def send_whatsapp_reply(to, text):
         app.logger.error(f"Send error to {to}: {e}")
 
 
+def send_reply_with_delay(receiver, text):
+    parts = [part.strip() for part in text.split("\n\n") if part.strip()]
+    for part in parts:
+        send_whatsapp_reply(receiver, part)
+        time.sleep(1)
+
+
 def notify_handover(phone, msg):
     note = f"[Handover] 客户 {phone} 提了预约: {msg}"
     send_whatsapp_reply(WASSENGER_GROUP_ID, note)
 
 
-def save_message_to_airtable(sender, Receiver, message, role):
+def save_message_to_airtable(sender, receiver, message, role):
     data = {
         "fields": {
             "Sender": sender,
-            "Receiver": Receiver,
+            "Receiver": receiver,
             "Message": message,
             "Role": role
         }
@@ -148,15 +152,15 @@ def save_message_to_airtable(sender, Receiver, message, role):
     try:
         resp = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
         resp.raise_for_status()
-        app.logger.info(f"Saved {role} message for {Receiver}")
+        app.logger.info(f"Saved {role} message for {receiver}")
     except Exception as e:
         app.logger.error(f"Failed to save message to Airtable: {e}")
 
 
-def fetch_last_10_history(Receiver):
-    Receiver = Receiver.lstrip('+')
+def fetch_last_10_history(receiver):
+    receiver = receiver.lstrip('+')
     params = {
-        "filterByFormula": f"{{Receiver}} = '{Receiver}'",
+        "filterByFormula": f"{{Receiver}} = '{receiver}'",
         "sort[0][field]": "CreatedTime",
         "sort[0][direction]": "desc",
         "maxRecords": 10
@@ -178,20 +182,36 @@ def fetch_last_10_history(Receiver):
         return []
 
 
-def generate_claude_reply(bot_number, Receiver, user_msg):
-    save_message_to_airtable(bot_number, Receiver, user_msg, "user")
+def generate_claude_reply(bot_number, receiver, user_msg):
+    save_message_to_airtable(bot_number, receiver, user_msg, "user")
 
-    messages = fetch_last_10_history(Receiver)
+    messages = fetch_last_10_history(receiver)
 
     if not messages:
         lang = detect_language(user_msg)
         intro = (
-            "Hi there! I’m Coco from Ventopia. Which area are you exploring today—\n1) E-commerce\n2) TikTok\n3) F&B\n4) Social media\n5) Website/Google Ads\n6) Store-Visit videos\n7) WeChat Commerce"
+            "Hi there! 👋 I'm Coco from Ventopia's marketing team.\n\n"
+            "Which area are you exploring today? I can help with:\n"
+            "1) E-commerce (Shopee/Lazada)\n"
+            "2) TikTok marketing\n"
+            "3) F&B promotion\n"
+            "4) Social media management\n"
+            "5) Website/Google Ads\n"
+            "6) Store-Visit videos\n"
+            "7) WeChat Commerce platform"
             if lang == 'en' else
-            "你好！我是 Ventopia 的 Coco，请问你今天想了解哪方面的服务呢？\n1) 电商\n2) TikTok\n3) 餐饮\n4) 社交媒体\n5) 网站/谷歌广告\n6) 到店视频\n7) 微信商城"
+            "你好！我是 Ventopia 的 Coco，请问你今天想了解哪方面的服务呢？\n\n"
+            "1) 电商\n"
+            "2) TikTok\n"
+            "3) 餐饮\n"
+            "4) 社交媒体\n"
+            "5) 网站/谷歌广告\n"
+            "6) 到店视频\n"
+            "7) 微信商城"
         )
-        save_message_to_airtable(bot_number, Receiver, intro, "assistant")
-        return split_message(intro)
+        save_message_to_airtable(bot_number, receiver, intro, "assistant")
+        send_reply_with_delay(receiver, intro)
+        return
 
     response = claude_client.messages.create(
         model=CLAUDE_MODEL,
@@ -201,8 +221,8 @@ def generate_claude_reply(bot_number, Receiver, user_msg):
     )
 
     reply = ''.join(getattr(p, 'text', str(p)) for p in response.content).strip().replace('您', '你')
-    save_message_to_airtable(bot_number, Receiver, reply, "assistant")
-    return split_message(reply)
+    save_message_to_airtable(bot_number, receiver, reply, "assistant")
+    send_reply_with_delay(receiver, reply)
 
 
 @app.route('/webhook', methods=['POST'])
@@ -216,17 +236,16 @@ def webhook():
     if data.get('meta', {}).get('isGroup'):
         return jsonify({'status': 'group_ignored'}), 200
 
-    Receiver = (data.get('fromNumber') or data.get('from', '').split('@')[0]).lstrip('+')
+    receiver = (data.get('fromNumber') or data.get('from', '').split('@')[0]).lstrip('+')
     msg = data.get('body', '').strip()
-    if not Receiver or not msg:
+    if not receiver or not msg:
         return jsonify({'status': 'ignored'}), 200
 
     try:
         if any(k.lower() in msg.lower() for k in BOOKING_KEYWORDS):
-            notify_handover(Receiver, msg)
+            notify_handover(receiver, msg)
             ack = ('好的，马上帮你转接，请稍等~' if detect_language(msg) == 'zh' else 'Sure, connecting you now.')
-            for part in split_message(ack):
-                send_whatsapp_reply(Receiver, part)
+            send_reply_with_delay(receiver, ack)
             return jsonify({'status': 'handover'}), 200
 
         if URL_PATTERN.search(msg):
@@ -243,16 +262,13 @@ def webhook():
                 max_tokens=8192
             )
             text = ''.join(getattr(p, 'text', str(p)) for p in resp.content).strip().replace('您', '你')
-            for part in split_message(text):
-                send_whatsapp_reply(Receiver, part)
+            send_reply_with_delay(receiver, text)
             ask = ('现在在用哪些平台做推广？' if lang == 'zh' else 'Which platforms are you currently using?')
-            for part in split_message(ask):
-                send_whatsapp_reply(Receiver, part)
+            send_reply_with_delay(receiver, ask)
             return jsonify({'status': 'ok'}), 200
 
         bot_number = WASSENGER_DEVICE_ID
-        for part in generate_claude_reply(bot_number, Receiver, msg):
-            send_whatsapp_reply(Receiver, part)
+        generate_claude_reply(bot_number, receiver, msg)
         return jsonify({'status': 'ok'}), 200
 
     except Exception as e:
