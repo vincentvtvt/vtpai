@@ -53,11 +53,11 @@ def notify_handover(phone, msg):
     send_whatsapp_reply(WASSENGER_GROUP_ID, note)
 
 
-def save_message_to_airtable(sender, receiver, message, role):
+def save_message_to_airtable(sender, Receiver, message, role):
     data = {
         "fields": {
             "Sender": sender,
-            "Receiver": receiver,
+            "Receiver": Receiver,
             "Message": message,
             "Role": role
         }
@@ -65,15 +65,15 @@ def save_message_to_airtable(sender, receiver, message, role):
     try:
         resp = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
         resp.raise_for_status()
-        app.logger.info(f"Saved {role} message for {receiver}")
+        app.logger.info(f"Saved {role} message for {Receiver}")
     except Exception as e:
         app.logger.error(f"Failed to save message to Airtable: {e}")
 
 
-def fetch_last_10_history(receiver):
-    receiver = receiver.lstrip('+')
+def fetch_last_10_history(Receiver):
+    Receiver = Receiver.lstrip('+')
     params = {
-        "filterByFormula": f"{{Receiver}} = '{receiver}'",
+        "filterByFormula": f"{{Receiver}} = '{Receiver}'",
         "sort[0][field]": "CreatedTime",
         "sort[0][direction]": "desc",
         "maxRecords": 10
@@ -95,10 +95,10 @@ def fetch_last_10_history(receiver):
         return []
 
 
-def generate_claude_reply(bot_number, receiver, user_msg):
-    save_message_to_airtable(bot_number, receiver, user_msg, "user")
+def generate_claude_reply(bot_number, Receiver, user_msg):
+    save_message_to_airtable(bot_number, Receiver, user_msg, "user")
 
-    messages = fetch_last_10_history(receiver)
+    messages = fetch_last_10_history(Receiver)
 
     if not messages:
         lang = detect_language(user_msg)
@@ -107,7 +107,7 @@ def generate_claude_reply(bot_number, receiver, user_msg):
             if lang == 'en' else
             "你好！我是 Ventopia 的 Coco，请问你今天想了解哪方面的服务呢？\n1) 电商\n2) TikTok\n3) 餐饮\n4) 社交媒体\n5) 网站/谷歌广告\n6) 到店视频\n7) 微信商城"
         )
-        save_message_to_airtable(bot_number, receiver, intro, "assistant")
+        save_message_to_airtable(bot_number, Receiver, intro, "assistant")
         return split_message(intro)
 
     response = claude_client.messages.create(
@@ -118,7 +118,7 @@ def generate_claude_reply(bot_number, receiver, user_msg):
     )
 
     reply = ''.join(getattr(p, 'text', str(p)) for p in response.content).strip().replace('您', '你')
-    save_message_to_airtable(bot_number, receiver, reply, "assistant")
+    save_message_to_airtable(bot_number, Receiver, reply, "assistant")
     return split_message(reply)
 
 
@@ -133,17 +133,17 @@ def webhook():
     if data.get('meta', {}).get('isGroup'):
         return jsonify({'status': 'group_ignored'}), 200
 
-    receiver = (data.get('fromNumber') or data.get('from', '').split('@')[0]).lstrip('+')
+    Receiver = (data.get('fromNumber') or data.get('from', '').split('@')[0]).lstrip('+')
     msg = data.get('body', '').strip()
-    if not receiver or not msg:
+    if not Receiver or not msg:
         return jsonify({'status': 'ignored'}), 200
 
     try:
         if any(k.lower() in msg.lower() for k in BOOKING_KEYWORDS):
-            notify_handover(receiver, msg)
+            notify_handover(Receiver, msg)
             ack = ('好的，马上帮你转接，请稍等~' if detect_language(msg) == 'zh' else 'Sure, connecting you now.')
             for part in split_message(ack):
-                send_whatsapp_reply(receiver, part)
+                send_whatsapp_reply(Receiver, part)
             return jsonify({'status': 'handover'}), 200
 
         if URL_PATTERN.search(msg):
@@ -161,15 +161,15 @@ def webhook():
             )
             text = ''.join(getattr(p, 'text', str(p)) for p in resp.content).strip().replace('您', '你')
             for part in split_message(text):
-                send_whatsapp_reply(receiver, part)
+                send_whatsapp_reply(Receiver, part)
             ask = ('现在在用哪些平台做推广？' if lang == 'zh' else 'Which platforms are you currently using?')
             for part in split_message(ask):
-                send_whatsapp_reply(receiver, part)
+                send_whatsapp_reply(Receiver, part)
             return jsonify({'status': 'ok'}), 200
 
         bot_number = WASSENGER_DEVICE_ID
-        for part in generate_claude_reply(bot_number, receiver, msg):
-            send_whatsapp_reply(receiver, part)
+        for part in generate_claude_reply(bot_number, Receiver, msg):
+            send_whatsapp_reply(Receiver, part)
         return jsonify({'status': 'ok'}), 200
 
     except Exception as e:
