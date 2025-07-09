@@ -13,7 +13,7 @@ CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-7-sonnet-20250219")
 WASSENGER_API_KEY = os.getenv("WASSENGER_API_KEY")
 WASSENGER_GROUP_ID = os.getenv("WASSENGER_GROUP_ID")
-WASSENGER_DEVICE_ID = os.getenv("WASSENGER_DEVICE_ID")  # bot's own WhatsApp number
+WASSENGER_DEVICE_ID = os.getenv("WASSENGER_DEVICE_ID")  # bot’s number
 
 AIRTABLE_PAT = os.getenv("AIRTABLE_PAT")
 AIRTABLE_BASE_ID = "appUkjxuY1a5HSSC3"
@@ -22,17 +22,20 @@ AIRTABLE_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_
 AIRTABLE_HEADERS = {"Authorization": f"Bearer {AIRTABLE_PAT}"}
 
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
-URL_PATTERN = re.compile(r'https?://\S+')
+URL_PATTERN = re.compile(r'https?://\\S+')
 
 SYSTEM_PROMPT = """<instructions> … your full system prompt … </instructions>"""
 
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
+
 def detect_language(text):
     return 'zh' if re.search(r'[\u4e00-\u9fff]', text) else 'en'
 
+
 def split_message(text):
     return [text.strip()]
+
 
 def send_whatsapp_reply(to, text):
     url = "https://api.wassenger.com/v1/messages"
@@ -44,68 +47,68 @@ def send_whatsapp_reply(to, text):
     except Exception as e:
         app.logger.error(f"Send error to {to}: {e}")
 
+
 def notify_handover(phone, msg):
     note = f"[Handover] 客户 {phone} 提了预约: {msg}"
     send_whatsapp_reply(WASSENGER_GROUP_ID, note)
 
-def fetch_airtable_history(receiver):
-    receiver = receiver.lstrip('+')
-    params = {
-        "filterByFormula": f"{{Receiver}} = '{receiver}'",
-        "sort[0][field]": "LastUpdated",
-        "sort[0][direction]": "desc",
-        "maxRecords": 1
-    }
-    try:
-        resp = requests.get(AIRTABLE_URL, headers=AIRTABLE_HEADERS, params=params)
-        resp.raise_for_status()
-        records = resp.json().get("records", [])
-        if not records:
-            return ""
-        return records[0]['fields'].get("History", "")
-    except Exception as e:
-        app.logger.error(f"Failed to fetch Airtable history: {e}")
-        return ""
 
-def save_message_to_airtable(sender, receiver, history_text):
+def save_message_to_airtable(sender, receiver, message, role):
     data = {
         "fields": {
             "Sender": sender,
             "Receiver": receiver,
-            "History": history_text
+            "Message": message,
+            "Role": role
         }
     }
     try:
         resp = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
         resp.raise_for_status()
-        app.logger.info(f"Saved history for {receiver}")
+        app.logger.info(f"Saved {role} message for {receiver}")
     except Exception as e:
         app.logger.error(f"Failed to save message to Airtable: {e}")
 
-def generate_claude_reply(bot_number, receiver, user_msg):
-    prev_history = fetch_airtable_history(receiver)
-    chat_log = prev_history.strip() + "\n" if prev_history else ""
-    chat_log += f"Customer: {user_msg}\n"
 
-    if not prev_history:
+def fetch_last_10_history(receiver):
+    receiver = receiver.lstrip('+')
+    params = {
+        "filterByFormula": f"{{Receiver}} = '{receiver}'",
+        "sort[0][field]": "CreatedTime",
+        "sort[0][direction]": "desc",
+        "maxRecords": 10
+    }
+    try:
+        resp = requests.get(AIRTABLE_URL, headers=AIRTABLE_HEADERS, params=params)
+        resp.raise_for_status()
+        records = resp.json().get("records", [])
+        messages = []
+        for r in reversed(records):  # oldest -> newest
+            fields = r.get("fields", {})
+            if fields.get("Role") == "user":
+                messages.append({"role": "user", "content": fields.get("Message", "")})
+            elif fields.get("Role") == "assistant":
+                messages.append({"role": "assistant", "content": fields.get("Message", "")})
+        return messages
+    except Exception as e:
+        app.logger.error(f"Failed to fetch history: {e}")
+        return []
+
+
+def generate_claude_reply(bot_number, receiver, user_msg):
+    save_message_to_airtable(bot_number, receiver, user_msg, "user")
+
+    messages = fetch_last_10_history(receiver)
+
+    if not messages:
         lang = detect_language(user_msg)
         intro = (
             "Hi there! I’m Coco from Ventopia. Which area are you exploring today—\n1) E-commerce\n2) TikTok\n3) F&B\n4) Social media\n5) Website/Google Ads\n6) Store-Visit videos\n7) WeChat Commerce"
             if lang == 'en' else
             "你好！我是 Ventopia 的 Coco，请问你今天想了解哪方面的服务呢？\n1) 电商\n2) TikTok\n3) 餐饮\n4) 社交媒体\n5) 网站/谷歌广告\n6) 到店视频\n7) 微信商城"
         )
-        chat_log += f"Bot: {intro}"
-        save_message_to_airtable(bot_number, receiver, chat_log)
+        save_message_to_airtable(bot_number, receiver, intro, "assistant")
         return split_message(intro)
-
-    # build messages for Claude
-    history_lines = chat_log.strip().splitlines()
-    messages = []
-    for line in history_lines:
-        if line.startswith("Customer:"):
-            messages.append({"role": "user", "content": line.replace("Customer:", "").strip()})
-        elif line.startswith("Bot:"):
-            messages.append({"role": "assistant", "content": line.replace("Bot:", "").strip()})
 
     response = claude_client.messages.create(
         model=CLAUDE_MODEL,
@@ -115,10 +118,9 @@ def generate_claude_reply(bot_number, receiver, user_msg):
     )
 
     reply = ''.join(getattr(p, 'text', str(p)) for p in response.content).strip().replace('您', '你')
-    chat_log += f"\nBot: {reply}"
-    save_message_to_airtable(bot_number, receiver, chat_log)
-
+    save_message_to_airtable(bot_number, receiver, reply, "assistant")
     return split_message(reply)
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -174,10 +176,12 @@ def webhook():
         app.logger.exception(f"Webhook error: {e}")
         return jsonify({'status': 'error', 'reason': str(e)}), 500
 
+
 @app.route('/', methods=['GET'])
 @app.route('/health', methods=['GET'])
 def health_check():
     return 'OK', 200
+
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
