@@ -127,12 +127,30 @@ def send_whatsapp_reply(to, text):
     except Exception as e:
         app.logger.error(f"Send error to {to}: {e}")
 
+def send_reply_with_delay(receiver, text, max_parts=3):
+    """
+    Splits reply into paragraphs, then intelligently merges into <= max_parts.
+    Sends each with 1-second delay.
+    """
+    paras = [p.strip() for p in text.split("\n\n") if p.strip()]
 
-def send_reply_with_delay(receiver, text):
-    parts = [part.strip() for part in text.split("\n\n") if part.strip()]
-    for part in parts:
+    # if too many paragraphs, merge evenly
+    if len(paras) > max_parts:
+        merged = []
+        per_part = len(paras) // max_parts
+        extra = len(paras) % max_parts
+        i = 0
+        for _ in range(max_parts):
+            take = per_part + (1 if extra > 0 else 0)
+            merged.append("  \n\n".join(paras[i:i+take]))
+            i += take
+            if extra > 0:
+                extra -= 1
+        paras = merged
+
+    for part in paras:
         send_whatsapp_reply(receiver, part)
-        time.sleep(1)
+        time.sleep(2)
 
 
 def notify_handover(phone, msg):
