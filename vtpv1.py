@@ -15,6 +15,8 @@ CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-7-sonnet-20250219")
 WASSENGER_API_KEY = os.getenv("WASSENGER_API_KEY")
 WASSENGER_GROUP_ID = os.getenv("WASSENGER_GROUP_ID")
+# New: specify which device to send from (Ventopia Sales)
+WASSENGER_DEVICE_ID = os.getenv("WASSENGER_DEVICE_ID")
 
 # Booking intent keywords
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
@@ -66,7 +68,12 @@ def send_whatsapp_reply(to, text):
         "Content-Type": "application/json",
         "Token": WASSENGER_API_KEY
     }
-    payload = {"phone": to, "message": text} if "@" not in to else {"group": to, "message": text}
+    # Include the device ID to send from Ventopia Sales
+    base_payload = {"message": text, "device": WASSENGER_DEVICE_ID}
+    if "@" not in to:
+        payload = {"phone": to, **base_payload}
+    else:
+        payload = {"group": to, **base_payload}
     try:
         resp = requests.post(url, json=payload, headers=headers)
         resp.raise_for_status()
