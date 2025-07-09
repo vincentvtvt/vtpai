@@ -19,7 +19,8 @@ AIRTABLE_PAT = os.getenv("AIRTABLE_PAT")
 AIRTABLE_BASE_ID = "appUkjxuY1a5HSSC3"
 AIRTABLE_TABLE_NAME = "CustomerHistory"
 AIRTABLE_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
-AIRTABLE_HEADERS = {"Authorization : Bearer{AIRTABLE_PAT}"}
+AIRTABLE_HEADERS = {"Authorization :" f"Bearer {AIRTABLE_PAT}"}
+
 
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
 URL_PATTERN = re.compile(r'https?://\\S+')
@@ -168,7 +169,7 @@ def generate_claude_reply(phone, user_msg):
         return split_message(intro)
 
     messages = [{"role": 'user' if h['speaker']=='user' else 'assistant', "content": h['text']} for h in history]
-    response = claude_client.messages.create(model=CLAUDE_MODEL, system=SYSTEM_PROMPT, messages=messages, max_tokens=200)
+    response = claude_client.messages.create(model=CLAUDE_MODEL, system=SYSTEM_PROMPT, messages=messages, max_tokens=8192)
     reply = ''.join(getattr(p, 'text', str(p)) for p in response.content).strip().replace('您', '你')
     save_message_to_airtable(phone, "assistant", reply)
     return split_message(reply)
@@ -201,7 +202,7 @@ def webhook():
             link = URL_PATTERN.search(msg).group()
             lang = detect_language(msg)
             analysis_prompt = (f"请根据SWOT分析这个网站：{link}，并给出简要概述。" if lang == 'zh' else f"Please analyze this website: {link} based on the SWOT framework and provide a brief summary.")
-            resp = claude_client.messages.create(model=CLAUDE_MODEL, system=SYSTEM_PROMPT, messages=[{'role': 'user', 'content': analysis_prompt}], max_tokens=200)
+            resp = claude_client.messages.create(model=CLAUDE_MODEL, system=SYSTEM_PROMPT, messages=[{'role': 'user', 'content': analysis_prompt}], max_tokens=8192)
             text = ''.join(getattr(p, 'text', str(p)) for p in resp.content).strip().replace('您', '你')
             for part in split_message(text):
                 send_whatsapp_reply(phone, part)
