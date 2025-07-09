@@ -5,30 +5,24 @@ import requests
 import anthropic
 from flask import Flask, request, jsonify
 
-# Logging configuration
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 app.logger.setLevel(logging.DEBUG)
 
-# Configuration from environment
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-7-sonnet-20250219")
 WASSENGER_API_KEY = os.getenv("WASSENGER_API_KEY")
 WASSENGER_GROUP_ID = os.getenv("WASSENGER_GROUP_ID")
-# New: specify which device to send from (Ventopia Sales)
 WASSENGER_DEVICE_ID = os.getenv("WASSENGER_DEVICE_ID")
 
-# Booking intent keywords
-BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
-URL_PATTERN = re.compile(r'https?://\S+')
+AIRTABLE_PAT = os.getenv("AIRTABLE_PAT")
+AIRTABLE_BASE_ID = "appUkjxuY1a5HSSC3"
+AIRTABLE_TABLE_NAME = "Leads"
+AIRTABLE_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
+AIRTABLE_HEADERS = {"Authorization": f"Bearer {AIRTABLE_PAT}"}
 
-SPIN_STAGES = [
-    {"id": 0, "role": "question"},
-    {"id": 1, "role": "question"},
-    {"id": 2, "role": "question"},
-    {"id": 3, "role": "question"},
-    {"id": 4, "role": "close"}
-]
+BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
+URL_PATTERN = re.compile(r'https?://\\S+')
 
 SYSTEM_PROMPT = """
 <instructions>
@@ -121,9 +115,6 @@ Does this fit your needs Should I share a quick case study or suggest a custom c
 </ExampleInteraction>
 """
 
-SPIN_STATE = {}
-SPIN_HISTORY = {}
-
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
 def detect_language(text):
@@ -134,19 +125,14 @@ def split_message(text, max_parts=3):
 
 def send_whatsapp_reply(to, text):
     url = "https://api.wassenger.com/v1/messages"
-    headers = {
-        "Content-Type": "application/json",
-        "Token": WASSENGER_API_KEY
-    }
-    # Include the device ID to send from Ventopia Sales
+    headers = {"Content-Type": "application/json", "Token": WASSENGER_API_KEY}
     base_payload = {"message": text, "device": WASSENGER_DEVICE_ID}
     if "@" not in to:
         payload = {"phone": to, **base_payload}
     else:
         payload = {"group": to, **base_payload}
     try:
-        resp = requests.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
+        requests.post(url, json=payload, headers=headers).raise_for_status()
         app.logger.info(f"Sent to {to}: {text}")
     except Exception as e:
         app.logger.error(f"Send error to {to}: {e}")
@@ -155,34 +141,42 @@ def notify_handover(phone, msg):
     note = f"[Handover] 客户 {phone} 提了预约: {msg}"
     send_whatsapp_reply(WASSENGER_GROUP_ID, note)
 
+def fetch_airtable_history(phone):
+    params = {"filterByFormula": f"{{Phone}} = '{phone}'", "sort[0][field]": "Timestamp", "sort[0][direction]": "desc", "maxRecords": 10}
+    try:
+        resp = requests.get(AIRTABLE_URL, headers=AIRTABLE_HEADERS, params=params)
+        resp.raise_for_status()
+        records = resp.json().get("records", [])
+        return [{"speaker": r['fields'].get("Speaker", "user"), "text": r['fields'].get("Message", "")} for r in reversed(records)]
+    except Exception as e:
+        app.logger.error(f"Failed to fetch Airtable history: {e}")
+        return []
+
+def save_message_to_airtable(phone, speaker, text):
+    data = {"fields": {"Phone": phone, "Speaker": speaker, "Message": text}}
+    try:
+        requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data).raise_for_status()
+    except Exception as e:
+        app.logger.error(f"Failed to save message to Airtable: {e}")
+
 def generate_claude_reply(phone, user_msg):
-    history = SPIN_HISTORY.setdefault(phone, [])
-    history.append({'speaker': 'user', 'text': user_msg})
+    save_message_to_airtable(phone, "user", user_msg)
+    history = fetch_airtable_history(phone)
+    if not history:
+        lang = detect_language(user_msg)
+        intro = ("Hi there! I’m Coco from Ventopia. Which area are you exploring today—\n1) E-commerce\n2) TikTok\n3) F&B\n4) Social media\n5) Website/Google Ads\n6) Store-Visit videos\n7) WeChat Commerce" if lang == 'en' else "你好！我是 Ventopia 的 Coco，请问你今天想了解哪方面的服务呢？\n1) 电商\n2) TikTok\n3) 餐饮\n4) 社交媒体\n5) 网站/谷歌广告\n6) 到店视频\n7) 微信商城")
+        return split_message(intro)
 
-    messages = [{'role': 'user' if turn['speaker']=='user' else 'assistant', 'content': turn['text']} for turn in history]
-
-    response = claude_client.messages.create(
-        model=CLAUDE_MODEL,
-        system=SYSTEM_PROMPT,
-        messages=messages,
-        max_tokens=200
-    )
-    raw = response.content
-    reply = ''.join(getattr(p, 'text', str(p)) for p in raw) if isinstance(raw, list) else str(raw)
-    reply = reply.strip().replace('您', '你')
-
-    history.append({'speaker': 'assistant', 'text': reply})
-    idx = SPIN_STATE.get(phone, 0)
-    if SPIN_STAGES[idx]['role'] in ['question', 'close']:
-        SPIN_STATE[phone] = idx + 1
-
+    messages = [{"role": 'user' if h['speaker']=='user' else 'assistant', "content": h['text']} for h in history]
+    response = claude_client.messages.create(model=CLAUDE_MODEL, system=SYSTEM_PROMPT, messages=messages, max_tokens=200)
+    reply = ''.join(getattr(p, 'text', str(p)) for p in response.content).strip().replace('您', '你')
+    save_message_to_airtable(phone, "assistant", reply)
     return split_message(reply)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     payload = request.get_json(force=True) or {}
     app.logger.debug(f"Incoming Wassenger payload: {payload}")
-
     if payload.get('event') != 'message:in:new':
         return jsonify({'status': 'ignored'}), 200
 
@@ -203,26 +197,15 @@ def webhook():
                 send_whatsapp_reply(phone, part)
             return jsonify({'status': 'handover'}), 200
 
-        if URL_PATTERN.search(msg) and SPIN_STATE.get(phone, 0) == 0:
+        if URL_PATTERN.search(msg):
             link = URL_PATTERN.search(msg).group()
             lang = detect_language(msg)
-            analysis_prompt = (
-                f"请根据SWOT分析这个网站：{link}，并给出简要概述。" if lang == 'zh' else
-                f"Please analyze this website: {link} based on the SWOT framework and provide a brief summary."
-            )
-            resp = claude_client.messages.create(
-                model=CLAUDE_MODEL,
-                system=SYSTEM_PROMPT,
-                messages=[{'role': 'user', 'content': analysis_prompt}],
-                max_tokens=200
-            )
-            raw = resp.content
-            text = ''.join(getattr(p, 'text', str(p)) for p in raw) if isinstance(raw, list) else str(raw)
-            text = text.strip().replace('您', '你')
+            analysis_prompt = (f"请根据SWOT分析这个网站：{link}，并给出简要概述。" if lang == 'zh' else f"Please analyze this website: {link} based on the SWOT framework and provide a brief summary.")
+            resp = claude_client.messages.create(model=CLAUDE_MODEL, system=SYSTEM_PROMPT, messages=[{'role': 'user', 'content': analysis_prompt}], max_tokens=200)
+            text = ''.join(getattr(p, 'text', str(p)) for p in resp.content).strip().replace('您', '你')
             for part in split_message(text):
                 send_whatsapp_reply(phone, part)
             ask = ('现在在用哪些平台做推广？' if lang == 'zh' else 'Which platforms are you currently using?')
-            SPIN_STATE[phone] = 1
             for part in split_message(ask):
                 send_whatsapp_reply(phone, part)
             return jsonify({'status': 'ok'}), 200
