@@ -376,4 +376,17 @@ def webhook():
     elif agent == Agent.TOOLS_HANDOVER:
         reply = tools_handover_ai(context)
     else:
-        reply = knowledge_ai(histor_
+         reply = knowledge_ai(history, msg, lang)  # fallback
+
+    save_message_to_airtable(bot_number, receiver, reply, "assistant")
+    send_reply_with_delay(receiver, reply)
+    return jsonify({'status': 'ok'}), 200
+
+@app.route('/', methods=['GET'])
+@app.route('/health', methods=['GET'])
+def health_check():
+    return 'OK', 200
+
+if __name__ == '__main__':
+    port = int(os.getenv("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
