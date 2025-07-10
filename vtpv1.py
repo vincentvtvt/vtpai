@@ -4,6 +4,7 @@ import os
 import time
 import requests
 import anthropic
+import json
 from flask import Flask, request, jsonify
 from enum import Enum
 
@@ -29,8 +30,9 @@ claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 URL_PATTERN = re.compile(r'(https?://[^\s,，。！]+)')
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
 
-SYSTEM_PROMPT = """<instructions>
-你是 Angela，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
+SYSTEM_PROMPT = """<instructions> 
+<instructions> 
+你是 Richelle，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
 
 当客户提到 marketing、packages、promotion、Ventopia 等时，请执行以下操作：
 
@@ -91,26 +93,27 @@ Google Ads & SEO：关键词、迷你站、广告、追踪 — RM 2,500 / 月
 平台开发
 
 微信商城：分销商城、订单 & 佣金后台 — RM 50,000（一次性）
+
+</Packages>
+<OutputStyle> 
+• 把你的回答拆分成 2–3 条独立消息 • 用简洁的项目符号呈现特色 
+• 始终以一个引导性问题收尾 
+</OutputStyle> 
+
+<ExampleInteraction> 
+User: I want to learn about your marketing packages. Assistant Msg 1: 你今天想了解哪个领域— 1) 电商 2) TikTok 3) 餐饮 4) 社交媒体 5) 网站/Google 广告 6) 到店视频 7) 微信商城
+User: 2
+Assistant Msg 2:
+好的—这是我们的 TikTok 全方位运营套餐：
+• 广告管理 & 专属客户经理
+• 营销策略 & 脚本
+• 每月 15-20 条视频剪辑
+RM 6,888 / 月
+
+Assistant Msg 3:
+这个符合你的需求吗？需要我分享一个案例还是建议定制组合？
+</ExampleInteraction>
 </instructions>"""  # Replace with your complete prompt.
-
-# ========= FLEXIBLE FIELD PATTERNS =========
-FIELD_PATTERNS = {
-    "name": [
-        r"(?:我叫|我是|Name is|My name is)\s*[:：]?\s*([\u4e00-\u9fffA-Za-z0-9_\- ]{2,20})",
-        r"公司名[称]?\s*[:：]?\s*([\u4e00-\u9fffA-Za-z0-9_\- ]{2,40})"
-    ],
-    "business_link": [
-        r"(https?://[^\s,，。！]+)",
-        r"(www\.[^\s,，。！]+)"
-    ],
-    "objective": [
-        r"(主要目标|需求|objective|目的|主要想法|Main goal is)\s*[:：]?\s*([\u4e00-\u9fffA-Za-z0-9_\- ]{2,30})",
-        r"(想推广|想要|要做|want to|looking for|想了解)\s*([\u4e00-\u9fffA-Za-z0-9_\- ]{2,30})"
-    ],
-    # Extendable: Add more patterns/fields as needed.
-}
-
-REQUIRED_FIELDS = ["name", "business_link", "objective"]
 
 PROMPT_TEMPLATES = {
     'zh': {
@@ -124,6 +127,8 @@ PROMPT_TEMPLATES = {
         'objective': "What's your main marketing objective?"
     }
 }
+
+REQUIRED_FIELDS = ["name", "business_link", "objective"]
 
 # ========= UTILS ==========
 def detect_language(text):
@@ -202,20 +207,42 @@ def fetch_last_10_history(receiver):
         app.logger.error(f"Failed to fetch history: {e}")
         return []
 
-# ========= FLEXIBLE CONTEXT EXTRACTION ==========
-def extract_context_from_history(history):
-    context = {'history': history}
-    for field, patterns in FIELD_PATTERNS.items():
-        for msg in history[::-1]:  # scan newest first for best match
-            if msg['role'] == 'user':
-                for pat in patterns:
-                    m = re.search(pat, msg['content'], re.I)
-                    if m:
-                        context[field] = m.group(1) if m.lastindex else m.group(0)
-                        break
-                if field in context:
-                    break
-    return context
+# ========= AI CONTEXT EXTRACTION ==========
+def ai_extract_context_from_history(history):
+    # Compose conversation text
+    convo = ""
+    for m in history:
+        role = "User" if m["role"] == "user" else "Bot"
+        convo += f"{role}: {m['content']}\n"
+    prompt = (
+        "You are a sales assistant. From the following WhatsApp chat history, extract as much information as possible in JSON with these keys:\n"
+        "- name (customer or company name, if given)\n"
+        "- business_link (any social/page link)\n"
+        "- objective (customer's main marketing goal or intent)\n"
+        "If info is missing, use null.\n\n"
+        "Chat history:\n"
+        "===\n"
+        f"{convo}\n"
+        "===\n"
+        "Output only valid JSON."
+    )
+    response = claude_client.messages.create(
+        model=CLAUDE_MODEL,
+        system="",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=512
+    )
+    # Extract JSON robustly
+    reply_text = ''.join(getattr(p, 'text', str(p)) for p in response.content)
+    match = re.search(r'\{[\s\S]+\}', reply_text)
+    if not match:
+        return {}
+    try:
+        context = json.loads(match.group(0))
+        return context
+    except Exception as e:
+        print("JSON parsing failed:", e)
+        return {}
 
 def get_missing_info(context):
     return [f for f in REQUIRED_FIELDS if not context.get(f)]
@@ -234,9 +261,8 @@ def build_swot_prompt(url, lang):
     else:
         return f"Please analyze this page: {url} using SWOT and provide a brief summary."
 
-def build_short_context(context, n=5):
-    messages = context.get('history', [])
-    return messages[-n:]
+def build_short_context(history, n=5):
+    return history[-n:]
 
 def send_handover_to_group(context):
     msg = (
@@ -282,18 +308,17 @@ def info_validator_needed(context):
     return bool(get_missing_info(context))
 
 # ========= AGENT LOGIC ==========
-def knowledge_ai(context, user_msg, lang):
-    prompt = SYSTEM_PROMPT
-    messages = build_short_context(context, n=5)
+def knowledge_ai(history, user_msg, lang):
+    messages = build_short_context(history, n=5)
     response = claude_client.messages.create(
         model=CLAUDE_MODEL,
-        system=prompt,
+        system=SYSTEM_PROMPT,
         messages=messages + [{'role': 'user', 'content': user_msg}],
         max_tokens=2048
     )
     return clean_reply(response)
 
-def tools_analysis_ai(context, user_msg, url, lang):
+def tools_analysis_ai(user_msg, url, lang):
     prompt = build_swot_prompt(url, lang)
     response = claude_client.messages.create(
         model=CLAUDE_MODEL,
@@ -304,15 +329,15 @@ def tools_analysis_ai(context, user_msg, url, lang):
     analysis = clean_reply(response)
     return analysis
 
-def tools_handover_ai(context, user_msg):
+def tools_handover_ai(context):
     send_handover_to_group(context)
     msg = "已为你安排顾问跟进，请稍等。" if context.get('lang') == 'zh' else "Our consultant will contact you soon."
     return msg
 
-def info_validator_ai(context):
+def info_validator_ai(context, lang):
     missing = get_missing_info(context)
     if missing:
-        return ask_for_missing_info(missing, context['lang'])
+        return ask_for_missing_info(missing, lang)
     else:
         return None  # All info collected, ready for handover
 
@@ -333,35 +358,22 @@ def webhook():
     bot_number = WASSENGER_DEVICE_ID
     save_message_to_airtable(bot_number, receiver, msg, "user")
     history = fetch_last_10_history(receiver)
-    context = extract_context_from_history(history)
+    context = ai_extract_context_from_history(history)
     lang = detect_language(msg)
     context['lang'] = lang
 
     agent = manager_ai(msg, context)
 
     if agent == Agent.KNOWLEDGE:
-        reply = knowledge_ai(context, msg, lang)
+        reply = knowledge_ai(history, msg, lang)
     elif agent == Agent.TOOLS_ANALYSIS:
         url = URL_PATTERN.search(msg).group()
-        reply = tools_analysis_ai(context, msg, url, lang)
+        reply = tools_analysis_ai(msg, url, lang)
     elif agent == Agent.INFO_VALIDATOR:
-        reply = info_validator_ai(context)
+        reply = info_validator_ai(context, lang)
         if not reply:
-            reply = tools_handover_ai(context, msg)
+            reply = tools_handover_ai(context)
     elif agent == Agent.TOOLS_HANDOVER:
-        reply = tools_handover_ai(context, msg)
+        reply = tools_handover_ai(context)
     else:
-        reply = knowledge_ai(context, msg, lang)  # fallback
-
-    save_message_to_airtable(bot_number, receiver, reply, "assistant")
-    send_reply_with_delay(receiver, reply)
-    return jsonify({'status': 'ok'}), 200
-
-@app.route('/', methods=['GET'])
-@app.route('/health', methods=['GET'])
-def health_check():
-    return 'OK', 200
-
-if __name__ == '__main__':
-    port = int(os.getenv("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+        reply = knowledge_ai(histor_
