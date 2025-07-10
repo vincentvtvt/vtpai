@@ -1,6 +1,7 @@
-facebook-scraper
-instaloader
-anthropic
 flask
 requests
+openai
+anthropic
+facebook-scraper
+instaloader
 lxml_html_clean
