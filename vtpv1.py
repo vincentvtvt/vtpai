@@ -12,7 +12,7 @@ from typing import List, Dict, Optional, Tuple, Any
 from flask import Flask, request, jsonify
 from enum import Enum
 
-# ==================== CONFIG ====================
+# ========== CONFIG ==========
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 
@@ -132,7 +132,7 @@ PROMPT_TEMPLATES = {
     }
 }
 
-# ==================== SCRAPERS ====================
+# ========== SCRAPERS ==========
 from facebook_scraper import get_profile, get_posts
 import instaloader
 
@@ -181,7 +181,7 @@ def get_social_page_summary(url: str) -> Tuple[Optional[Dict[str, Any]], str]:
     else:
         return None, "unsupported"
 
-# ==================== OPENAI IMAGE & AUDIO ====================
+# ========== OPENAI IMAGE & AUDIO ==========
 def download_media(media_url: str, wassenger_token: str) -> bytes:
     headers = {"Token": wassenger_token}
     resp = requests.get(media_url, headers=headers)
@@ -223,7 +223,7 @@ def transcribe_audio_with_whisper(audio_bytes: bytes, lang_hint='en') -> str:
         )
     return transcript.text.strip()
 
-# ==================== UTILS ====================
+# ========== UTILS ==========
 def detect_language(text: str) -> str:
     return 'zh' if re.search(r'[\u4e00-\u9fff]', text) else 'en'
 
@@ -356,7 +356,7 @@ def send_handover_to_group(context: Dict[str, Any]) -> None:
     )
     send_whatsapp_reply(WASSENGER_GROUP_ID, msg)
 
-# ==================== INTENT & AGENT ====================
+# ========== INTENT & AGENT ==========
 class Agent(Enum):
     MANAGER = "manager"
     KNOWLEDGE = "knowledge"
@@ -469,7 +469,7 @@ def info_validator_ai(context: Dict[str, Any], lang: str) -> Optional[str]:
     missing = get_missing_info(context)
     return ask_for_missing_info(missing, lang) if missing else None
 
-# ==================== MAIN WEBHOOK ====================
+# ========== MAIN WEBHOOK ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
     payload = request.get_json(force=True) or {}
@@ -499,6 +499,17 @@ def webhook():
     elif data.get('type') == 'text' and data.get('body'):
         msg = data.get('body', '').strip()
         lang = detect_language(msg)
+        # ---- Quoted (reply-to) message handling for vague replies ----
+        vague_replies = ["this", "that", "the above", "refer above", "above", "see above", "link", "page"]
+        if (
+            msg.lower() in vague_replies
+            and "quoted" in data
+            and data["quoted"].get("body")
+        ):
+            quoted_body = data["quoted"]["body"].strip()
+            if quoted_body:
+                msg = quoted_body
+                app.logger.info(f"Vague reply detected, replaced msg with quoted message: {msg}")
     else:
         if data.get('type') == 'sticker':
             send_whatsapp_reply(receiver, "收到你的贴纸啦~ 有什么需要帮忙的吗？")
