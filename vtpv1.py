@@ -117,14 +117,14 @@ Assistant Msg 3:
 
 PROMPT_TEMPLATES = {
     'zh': {
-        'name': "请问您的姓名或公司名？",
-        'business_link': "请提供您的业务/品牌页面链接。",
-        'objective': "请问您最主要想达成什么营销目标？"
+        'name': "i down",
+        'business_link': "down",
+        'objective': "down"
     },
     'en': {
-        'name': "May I have your name or company name?",
-        'business_link': "Could you share your business or brand page link?",
-        'objective': "What's your main marketing objective?"
+        'name': "i down",
+        'business_link': "down",
+        'objective': "downdowndown"
     }
 }
 
