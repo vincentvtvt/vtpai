@@ -32,7 +32,7 @@ BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
 
 SYSTEM_PROMPT = """<instructions> 
 <instructions> 
-你是 Richelle，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
+你是 Angela，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
 
 当客户提到 marketing、packages、promotion、Ventopia 等时，请执行以下操作：
 
@@ -113,18 +113,18 @@ RM 6,888 / 月
 Assistant Msg 3:
 这个符合你的需求吗？需要我分享一个案例还是建议定制组合？
 </ExampleInteraction>
-</instructions>"""  # Replace with your complete prompt.
+</instructions>"""  # Replace with your full prompt
 
 PROMPT_TEMPLATES = {
     'zh': {
-        'name': "i down",
-        'business_link': "down",
-        'objective': "down"
+        'name': "请问您的姓名或公司名？",
+        'business_link': "请提供您的业务/品牌页面链接。",
+        'objective': "请问您最主要想达成什么营销目标？"
     },
     'en': {
-        'name': "i down",
-        'business_link': "down",
-        'objective': "downdowndown"
+        'name': "May I have your name or company name?",
+        'business_link': "Could you share your business or brand page link?",
+        'objective': "What's your main marketing objective?"
     }
 }
 
@@ -145,7 +145,6 @@ def send_whatsapp_reply(to, text):
         app.logger.error(f"Send error to {to}: {e}")
 
 def send_reply_with_delay(receiver, text, max_parts=3):
-    # Splits long messages, sends with delay
     paras = [p.strip() for p in text.split("\n\n") if p.strip()]
     if len(paras) > max_parts:
         merged = []
@@ -209,7 +208,6 @@ def fetch_last_10_history(receiver):
 
 # ========= AI CONTEXT EXTRACTION ==========
 def ai_extract_context_from_history(history):
-    # Compose conversation text
     convo = ""
     for m in history:
         role = "User" if m["role"] == "user" else "Bot"
@@ -220,29 +218,31 @@ def ai_extract_context_from_history(history):
         "- business_link (any social/page link)\n"
         "- objective (customer's main marketing goal or intent)\n"
         "If info is missing, use null.\n\n"
+        "If you cannot extract anything, reply with: {\"name\": null, \"business_link\": null, \"objective\": null}\n\n"
         "Chat history:\n"
         "===\n"
         f"{convo}\n"
         "===\n"
         "Output only valid JSON."
     )
-    response = claude_client.messages.create(
-        model=CLAUDE_MODEL,
-        system="",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=512
-    )
-    # Extract JSON robustly
-    reply_text = ''.join(getattr(p, 'text', str(p)) for p in response.content)
-    match = re.search(r'\{[\s\S]+\}', reply_text)
-    if not match:
-        return {}
     try:
+        response = claude_client.messages.create(
+            model=CLAUDE_MODEL,
+            system="",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=512
+        )
+        reply_text = ''.join(getattr(p, 'text', str(p)) for p in response.content)
+        app.logger.debug(f"Claude context extraction raw reply: {reply_text}")
+        match = re.search(r'\{[\s\S]+\}', reply_text)
+        if not match:
+            app.logger.error("No JSON found in Claude context extraction reply.")
+            return {"name": None, "business_link": None, "objective": None}
         context = json.loads(match.group(0))
         return context
     except Exception as e:
-        print("JSON parsing failed:", e)
-        return {}
+        app.logger.error(f"Context extraction failed: {e}")
+        return {"name": None, "business_link": None, "objective": None}
 
 def get_missing_info(context):
     return [f for f in REQUIRED_FIELDS if not context.get(f)]
@@ -376,7 +376,12 @@ def webhook():
     elif agent == Agent.TOOLS_HANDOVER:
         reply = tools_handover_ai(context)
     else:
-         reply = knowledge_ai(history, msg, lang)  # fallback
+        reply = knowledge_ai(history, msg, lang)  # fallback
+
+    # ===== FALLBACK HANDLING =====
+    bad_replies = ["i down", "down", "downdowndown", "", None]
+    if not reply or reply.strip().lower() in bad_replies:
+        reply = "我稍后回复你" if lang == "zh" else "I will reply to you shortly."
 
     save_message_to_airtable(bot_number, receiver, reply, "assistant")
     send_reply_with_delay(receiver, reply)
