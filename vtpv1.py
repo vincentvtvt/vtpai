@@ -33,8 +33,7 @@ REQUIRED_FIELDS: List[str] = ["name", "business_link", "objective"]
 
 SYSTEM_PROMPT: str = """
 <instructions> 
-<instructions> 
-你是 Angela，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
+你是 Richelle，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
 
 当客户提到 marketing、packages、promotion、Ventopia 等时，请执行以下操作：
 
@@ -375,7 +374,25 @@ def manager_ai(user_msg: str, context: Dict[str, Any], history: Optional[List[Di
     elif intent == "handover":
         return Agent.HUMAN
     else:
-        return Agent.KNOWLEDGE
+        # SPIN fallback
+        return Agent.MANAGER
+
+# ==================== SPIN FALLBACK ====================
+def spin_fallback(history: List[Dict[str, str]], lang: str) -> str:
+    prompts = {
+        'zh': [
+            "感谢你的消息！请问你现在主要关注哪方面业务？例如电商、社交媒体、网站推广等。",
+            "可以告诉我们你遇到的主要挑战或目标吗？我们能为你定制方案。",
+            "了解你的需求后，我们会为你推荐最适合的数字营销方案。"
+        ],
+        'en': [
+            "Thanks for reaching out! Which area are you mainly exploring—e-commerce, social media, website promotion, or something else?",
+            "Can you tell us your main challenge or marketing goal? We'll tailor our approach for you.",
+            "Once we understand your needs, we can recommend the best digital marketing solutions for you."
+        ]
+    }
+    # Optionally, you can rotate based on conversation history for multi-step SPIN flow
+    return prompts[lang][0]
 
 # ==================== AGENT LOGIC ====================
 def knowledge_ai(history: List[Dict[str, str]], user_msg: str, lang: str) -> str:
@@ -461,8 +478,17 @@ def webhook():
     if payload.get('event') != 'message:in:new':
         return jsonify({'status': 'ignored'}), 200
     data = payload.get('data', {})
-    if data.get('meta', {}).get('isGroup'):
-        return jsonify({'status': 'group_ignored'}), 200
+    # Robustly handle non-text input
+    if data.get('type') != 'text' or not data.get('body'):
+        # Optionally: acknowledge stickers/media
+        if data.get('type') == 'sticker':
+            receiver = (data.get('fromNumber') or data.get('from', '').split('@')[0]).lstrip('+')
+            send_whatsapp_reply(receiver, "收到你的贴纸啦~ 有什么需要帮忙的吗？")
+        elif data.get('type') == 'image':
+            receiver = (data.get('fromNumber') or data.get('from', '').split('@')[0]).lstrip('+')
+            send_whatsapp_reply(receiver, "收到你的图片！如果有需要分析或咨询，欢迎留言。")
+        return jsonify({'status': 'ignored_non_text'}), 200
+
     receiver = (data.get('fromNumber') or data.get('from', '').split('@')[0]).lstrip('+')
     msg = data.get('body', '').strip()
     if not receiver or not msg:
@@ -506,6 +532,8 @@ def webhook():
     elif agent == Agent.HUMAN:
         send_handover_to_group(context)
         reply = "已为你安排顾问跟进，请稍等。" if lang == "zh" else "Our consultant will contact you soon."
+    elif agent == Agent.MANAGER:  # Fallback to SPIN consultative
+        reply = spin_fallback(history, lang)
     else:
         reply = knowledge_ai(history, msg, lang)  # fallback
 
