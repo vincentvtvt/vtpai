@@ -8,7 +8,8 @@ import json
 from flask import Flask, request, jsonify
 from enum import Enum
 
-# ========== CONFIG ==========
+# ==================== CONFIG ====================
+
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 app.logger.setLevel(logging.DEBUG)
@@ -30,7 +31,7 @@ claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 URL_PATTERN = re.compile(r'(https?://[^\s,，。！]+)')
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
 
-SYSTEM_PROMPT = """<instructions><instructions> 
+SYSTEM_PROMPT = """<instructions> 
 <instructions> 
 你是 Richelle，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
 
@@ -113,7 +114,7 @@ RM 6,888 / 月
 Assistant Msg 3:
 这个符合你的需求吗？需要我分享一个案例还是建议定制组合？
 </ExampleInteraction>
-</instructions></instructions>"""  # Replace with your full prompt
+</instructions>"""  # Replace with your full prompt
 
 PROMPT_TEMPLATES = {
     'zh': {
@@ -130,14 +131,68 @@ PROMPT_TEMPLATES = {
 
 REQUIRED_FIELDS = ["name", "business_link", "objective"]
 
-# ========= UTILS ==========
+# ==================== SCRAPERS ====================
+
+from facebook_scraper import get_profile, get_posts
+import instaloader
+
+def fetch_fb_page_summary(fb_url):
+    import re
+    match = re.search(r'facebook.com/([^/?&]+)', fb_url)
+    if not match:
+        return None
+    page_id = match.group(1)
+    try:
+        profile = get_profile(page_id)
+        posts = list(get_posts(page_id, pages=1))
+        summary = {
+            "name": profile.get("Name", page_id),
+            "likes": profile.get("Followers"),
+            "bio": profile.get("About"),
+            "recent_posts": [p["text"][:200] for p in posts[:3] if "text" in p]
+        }
+        return summary
+    except Exception as e:
+        print(f"FB Scraping error: {e}")
+        return None
+
+def fetch_instagram_summary(insta_url):
+    import re
+    match = re.search(r'instagram\.com/([^/?&]+)', insta_url)
+    if not match:
+        return None
+    username = match.group(1)
+    try:
+        L = instaloader.Instaloader()
+        profile = instaloader.Profile.from_username(L.context, username)
+        summary = {
+            "name": profile.full_name or username,
+            "followers": profile.followers,
+            "bio": profile.biography,
+            "recent_posts": [post.caption[:200] for post in profile.get_posts() if post.caption][:3]
+        }
+        return summary
+    except Exception as e:
+        print(f"Instagram scraping error: {e}")
+        return None
+
+def get_social_page_summary(url):
+    url = url.lower()
+    if "facebook.com" in url:
+        return fetch_fb_page_summary(url), "facebook"
+    elif "instagram.com" in url:
+        return fetch_instagram_summary(url), "instagram"
+    else:
+        return None, "unsupported"
+
+# ==================== UTILS ====================
+
 def detect_language(text):
     return 'zh' if re.search(r'[\u4e00-\u9fff]', text) else 'en'
 
 def send_whatsapp_reply(to, text):
     url = "https://api.wassenger.com/v1/messages"
     headers = {"Content-Type": "application/json", "Token": WASSENGER_API_KEY}
-    # Auto-detect group (group IDs are long, all digits, or @g.us format)
     if (to.isdigit() and len(to) > 15) or (isinstance(to, str) and to.endswith("@g.us")):
         group_id = to.replace("@g.us", "") if isinstance(to, str) else str(to)
         payload = {"group": group_id, "message": text, "device": WASSENGER_DEVICE_ID}
@@ -167,10 +222,6 @@ def send_reply_with_delay(receiver, text, max_parts=3):
     for part in paras:
         send_whatsapp_reply(receiver, part)
         time.sleep(2)
-
-def notify_handover(phone, msg):
-    note = f"[Handover] 客户 {phone} 提了预约: {msg}"
-    send_whatsapp_reply(WASSENGER_GROUP_ID, note)
 
 def save_message_to_airtable(sender, receiver, message, role):
     data = {
@@ -212,7 +263,6 @@ def fetch_last_10_history(receiver):
         app.logger.error(f"Failed to fetch history: {e}")
         return []
 
-# ========= AI CONTEXT EXTRACTION ==========
 def ai_extract_context_from_history(history):
     convo = ""
     for m in history:
@@ -261,12 +311,6 @@ def clean_reply(response):
     text = ''.join(getattr(p, 'text', str(p)) for p in response.content).strip().replace('您', '你')
     return text
 
-def build_swot_prompt(url, lang):
-    if lang == 'zh':
-        return f"请根据SWOT分析这个页面：{url}，并给出简要概述。"
-    else:
-        return f"Please analyze this page: {url} using SWOT and provide a brief summary."
-
 def build_short_context(history, n=5):
     return history[-n:]
 
@@ -279,7 +323,8 @@ def send_handover_to_group(context):
     )
     send_whatsapp_reply(WASSENGER_GROUP_ID, msg)
 
-# ========= AGENT ROUTER ==========
+# ==================== AGENT ROUTER ====================
+
 class Agent(Enum):
     MANAGER = "manager"
     KNOWLEDGE = "knowledge"
@@ -313,7 +358,8 @@ def is_package_or_service_query(msg):
 def info_validator_needed(context):
     return bool(get_missing_info(context))
 
-# ========= AGENT LOGIC ==========
+# ==================== AGENT LOGIC ====================
+
 def knowledge_ai(history, user_msg, lang):
     messages = build_short_context(history, n=5)
     response = claude_client.messages.create(
@@ -325,7 +371,31 @@ def knowledge_ai(history, user_msg, lang):
     return clean_reply(response)
 
 def tools_analysis_ai(user_msg, url, lang):
-    prompt = build_swot_prompt(url, lang)
+    page_data, platform = get_social_page_summary(url)
+    if not page_data:
+        return (
+            "这个平台目前暂时无法自动分析页面内容，我们可以安排顾问与您会面，做详细分析。"
+            if lang == "zh" else
+            "We are unable to automatically analyze this platform right now. We can arrange for a consultant to meet with you for a detailed review."
+        )
+    if platform == "facebook":
+        prompt = (
+            f"Here is the Facebook page info:\n"
+            f"Name: {page_data.get('name')}\n"
+            f"Likes: {page_data.get('likes')}\n"
+            f"Description: {page_data.get('bio')}\n"
+            f"Recent posts: {page_data.get('recent_posts')}\n\n"
+            f"Please analyze this page for marketing strengths, weaknesses, and suggestions. Reply in {'Chinese' if lang == 'zh' else 'English'}."
+        )
+    elif platform == "instagram":
+        prompt = (
+            f"Here is the Instagram profile info:\n"
+            f"Name: {page_data.get('name')}\n"
+            f"Followers: {page_data.get('followers')}\n"
+            f"Bio: {page_data.get('bio')}\n"
+            f"Recent posts: {page_data.get('recent_posts')}\n\n"
+            f"Please analyze this profile for marketing strengths, weaknesses, and suggestions. Reply in {'Chinese' if lang == 'zh' else 'English'}."
+        )
     response = claude_client.messages.create(
         model=CLAUDE_MODEL,
         system=SYSTEM_PROMPT,
@@ -347,7 +417,8 @@ def info_validator_ai(context, lang):
     else:
         return None  # All info collected, ready for handover
 
-# ========= MAIN WEBHOOK ==========
+# ==================== MAIN WEBHOOK ====================
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     payload = request.get_json(force=True) or {}
