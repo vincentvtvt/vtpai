@@ -16,7 +16,7 @@ app.logger.setLevel(logging.DEBUG)
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-7-sonnet-20250219")
 WASSENGER_API_KEY = os.getenv("WASSENGER_API_KEY")
-WASSENGER_GROUP_ID = os.getenv("WASSENGER_GROUP_ID")
+WASSENGER_GROUP_ID = "120363420144025700"    # Your group ID as a string
 WASSENGER_DEVICE_ID = os.getenv("WASSENGER_DEVICE_ID")
 
 AIRTABLE_PAT = os.getenv("AIRTABLE_PAT")
@@ -30,9 +30,9 @@ claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 URL_PATTERN = re.compile(r'(https?://[^\s,，。！]+)')
 BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
 
-SYSTEM_PROMPT = """<instructions> 
+SYSTEM_PROMPT = """<instructions><instructions> 
 <instructions> 
-你是 Angela，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
+你是 Richelle，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
 
 当客户提到 marketing、packages、promotion、Ventopia 等时，请执行以下操作：
 
@@ -113,7 +113,7 @@ RM 6,888 / 月
 Assistant Msg 3:
 这个符合你的需求吗？需要我分享一个案例还是建议定制组合？
 </ExampleInteraction>
-</instructions>"""  # Replace with your full prompt
+</instructions></instructions>"""  # Replace with your full prompt
 
 PROMPT_TEMPLATES = {
     'zh': {
@@ -137,9 +137,15 @@ def detect_language(text):
 def send_whatsapp_reply(to, text):
     url = "https://api.wassenger.com/v1/messages"
     headers = {"Content-Type": "application/json", "Token": WASSENGER_API_KEY}
-    payload = {"phone": to, "message": text, "device": WASSENGER_DEVICE_ID}
+    # Auto-detect group (group IDs are long, all digits, or @g.us format)
+    if (to.isdigit() and len(to) > 15) or (isinstance(to, str) and to.endswith("@g.us")):
+        group_id = to.replace("@g.us", "") if isinstance(to, str) else str(to)
+        payload = {"group": group_id, "message": text, "device": WASSENGER_DEVICE_ID}
+    else:
+        payload = {"phone": to, "message": text, "device": WASSENGER_DEVICE_ID}
     try:
-        requests.post(url, json=payload, headers=headers).raise_for_status()
+        resp = requests.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
         app.logger.info(f"Sent to {to}: {text}")
     except Exception as e:
         app.logger.error(f"Send error to {to}: {e}")
