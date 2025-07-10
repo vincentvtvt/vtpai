@@ -9,7 +9,6 @@ from flask import Flask, request, jsonify
 from enum import Enum
 
 # ==================== CONFIG ====================
-
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 app.logger.setLevel(logging.DEBUG)
@@ -17,7 +16,7 @@ app.logger.setLevel(logging.DEBUG)
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-7-sonnet-20250219")
 WASSENGER_API_KEY = os.getenv("WASSENGER_API_KEY")
-WASSENGER_GROUP_ID = "120363420144025700"    # Your group ID as a string
+WASSENGER_GROUP_ID = "120363420144025700"
 WASSENGER_DEVICE_ID = os.getenv("WASSENGER_DEVICE_ID")
 
 AIRTABLE_PAT = os.getenv("AIRTABLE_PAT")
@@ -33,7 +32,7 @@ BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
 
 SYSTEM_PROMPT = """<instructions> 
 <instructions> 
-你是 Richelle，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
+你是 Angela，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
 
 当客户提到 marketing、packages、promotion、Ventopia 等时，请执行以下操作：
 
@@ -132,7 +131,6 @@ PROMPT_TEMPLATES = {
 REQUIRED_FIELDS = ["name", "business_link", "objective"]
 
 # ==================== SCRAPERS ====================
-
 from facebook_scraper import get_profile, get_posts
 import instaloader
 
@@ -186,7 +184,6 @@ def get_social_page_summary(url):
         return None, "unsupported"
 
 # ==================== UTILS ====================
-
 def detect_language(text):
     return 'zh' if re.search(r'[\u4e00-\u9fff]', text) else 'en'
 
@@ -324,7 +321,6 @@ def send_handover_to_group(context):
     send_whatsapp_reply(WASSENGER_GROUP_ID, msg)
 
 # ==================== AGENT ROUTER ====================
-
 class Agent(Enum):
     MANAGER = "manager"
     KNOWLEDGE = "knowledge"
@@ -370,8 +366,15 @@ def knowledge_ai(history, user_msg, lang):
     )
     return clean_reply(response)
 
-def tools_analysis_ai(user_msg, url, lang):
-    page_data, platform = get_social_page_summary(url)
+def tools_analysis_ai(user_msg, url, lang, max_retry=1):
+    retry_count = 0
+    page_data, platform = None, None
+    while retry_count <= max_retry:
+        page_data, platform = get_social_page_summary(url)
+        if page_data:
+            break
+        retry_count += 1
+        time.sleep(1)
     if not page_data:
         return (
             "这个平台目前暂时无法自动分析页面内容，我们可以安排顾问与您会面，做详细分析。"
@@ -396,6 +399,12 @@ def tools_analysis_ai(user_msg, url, lang):
             f"Recent posts: {page_data.get('recent_posts')}\n\n"
             f"Please analyze this profile for marketing strengths, weaknesses, and suggestions. Reply in {'Chinese' if lang == 'zh' else 'English'}."
         )
+    else:
+        return (
+            "这个平台目前暂时无法自动分析页面内容，我们可以安排顾问与您会面，做详细分析。"
+            if lang == "zh" else
+            "We are unable to automatically analyze this platform right now. We can arrange for a consultant to meet with you for a detailed review."
+        )
     response = claude_client.messages.create(
         model=CLAUDE_MODEL,
         system=SYSTEM_PROMPT,
@@ -403,6 +412,13 @@ def tools_analysis_ai(user_msg, url, lang):
         max_tokens=1024
     )
     analysis = clean_reply(response)
+    # Only fallback if Claude gives empty/meaningless/short/arrange text
+    if not analysis or len(analysis) < 30 or "无法分析" in analysis or "arrange" in analysis.lower():
+        return (
+            "这个页面信息无法完整分析，我们可以安排顾问与您会面，做详细分析。"
+            if lang == "zh" else
+            "We are unable to analyze this page in detail. We can arrange for a consultant to assist you."
+        )
     return analysis
 
 def tools_handover_ai(context):
@@ -445,7 +461,10 @@ def webhook():
         reply = knowledge_ai(history, msg, lang)
     elif agent == Agent.TOOLS_ANALYSIS:
         url = URL_PATTERN.search(msg).group()
-        reply = tools_analysis_ai(msg, url, lang)
+        reply = tools_analysis_ai(msg, url, lang, max_retry=1)
+        # Handover to group if still fallback message
+        if "顾问" in reply or "consultant" in reply.lower():
+            send_handover_to_group(context)
     elif agent == Agent.INFO_VALIDATOR:
         reply = info_validator_ai(context, lang)
         if not reply:
