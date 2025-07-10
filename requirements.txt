@@ -3,3 +3,4 @@ instaloader
 anthropic
 flask
 requests
+lxml_html_clean
