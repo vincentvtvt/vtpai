@@ -1,27 +1,20 @@
-import os
 import logging
 import re
+import os
 import time
 import requests
 import anthropic
-import openai
-import base64
-import tempfile
-import json
-from typing import List, Dict, Optional, Tuple, Any
 from flask import Flask, request, jsonify
-from enum import Enum
 
-# ========== CONFIG ==========
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
+app.logger.setLevel(logging.DEBUG)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-7-sonnet-20250219")
 WASSENGER_API_KEY = os.getenv("WASSENGER_API_KEY")
-WASSENGER_DEVICE_ID = os.getenv("WASSENGER_DEVICE_ID")
-WASSENGER_GROUP_ID = "120363420144025700"
+WASSENGER_GROUP_ID = os.getenv("WASSENGER_GROUP_ID")
+WASSENGER_DEVICE_ID = os.getenv("WASSENGER_DEVICE_ID")  # bot’s number
 
 AIRTABLE_PAT = os.getenv("AIRTABLE_PAT")
 AIRTABLE_BASE_ID = "appUkjxuY1a5HSSC3"
@@ -29,13 +22,12 @@ AIRTABLE_TABLE_NAME = "CustomerHistory"
 AIRTABLE_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
 AIRTABLE_HEADERS = {"Authorization": f"Bearer {AIRTABLE_PAT}"}
 
-claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-URL_PATTERN = re.compile(r'(https?://[^\s,，。！]+)')
-REQUIRED_FIELDS = ["name", "business_link", "objective"]
+BOOKING_KEYWORDS = ["预约", "book", "appointment", "预约时间"]
+URL_PATTERN = re.compile(r'https?://\\S+')
 
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = """<instructions> 
 <instructions> 
-你是 Richelle，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
+你是 Angela，Ventopia 的 WhatsApp 销售助理。你的目标是利用 SPIN 销售法结合 Ventopia 全套营销方案和内部 SWOT 洞察来促成成交。
 
 当客户提到 marketing、packages、promotion、Ventopia 等时，请执行以下操作：
 
@@ -54,7 +46,7 @@ SYSTEM_PROMPT = """
 • 如果客户回答 “我不确定” 或 “0”，则呈现《全方位社交和数字营销套装》概览
 
 引导成交
-• 模仿客户的语气，分成 2–3 条简短消息发送
+• 以专业及简洁的语气，分成 2–3 条简短消息发送
 • 以 “这个符合你的需求吗？需要我分享一个案例还是建议定制组合？” 收尾
 
 风格规则
@@ -116,134 +108,33 @@ RM 6,888 / 月
 Assistant Msg 3:
 这个符合你的需求吗？需要我分享一个案例还是建议定制组合？
 </ExampleInteraction>
-</instructions>
-"""
+</instructions>"""
 
-PROMPT_TEMPLATES = {
-    'zh': {
-        'name': "请问您的姓名或公司名？",
-        'business_link': "请提供您的业务/品牌页面链接。",
-        'objective': "请问您最主要想达成什么营销目标？"
-    },
-    'en': {
-        'name': "May I have your name or company name?",
-        'business_link': "Could you share your business or brand page link?",
-        'objective': "What's your main marketing objective?"
-    }
-}
+claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
-# ========== SCRAPERS ==========
-from facebook_scraper import get_profile, get_posts
-import instaloader
 
-def fetch_fb_page_summary(fb_url: str) -> Optional[Dict[str, Any]]:
-    match = re.search(r'facebook.com/([^/?&]+)', fb_url)
-    if not match:
-        return None
-    page_id = match.group(1)
-    try:
-        profile = get_profile(page_id)
-        posts = list(get_posts(page_id, pages=1))
-        return {
-            "name": profile.get("Name", page_id),
-            "likes": profile.get("Followers"),
-            "bio": profile.get("About"),
-            "recent_posts": [p["text"][:200] for p in posts[:3] if "text" in p]
-        }
-    except Exception as e:
-        print(f"FB Scraping error: {e}")
-        return None
-
-def fetch_instagram_summary(insta_url: str) -> Optional[Dict[str, Any]]:
-    match = re.search(r'instagram\.com/([^/?&]+)', insta_url)
-    if not match:
-        return None
-    username = match.group(1)
-    try:
-        L = instaloader.Instaloader()
-        profile = instaloader.Profile.from_username(L.context, username)
-        return {
-            "name": profile.full_name or username,
-            "followers": profile.followers,
-            "bio": profile.biography,
-            "recent_posts": [post.caption[:200] for post in profile.get_posts() if post.caption][:3]
-        }
-    except Exception as e:
-        print(f"Instagram scraping error: {e}")
-        return None
-
-def get_social_page_summary(url: str) -> Tuple[Optional[Dict[str, Any]], str]:
-    url = url.lower()
-    if "facebook.com" in url:
-        return fetch_fb_page_summary(url), "facebook"
-    elif "instagram.com" in url:
-        return fetch_instagram_summary(url), "instagram"
-    else:
-        return None, "unsupported"
-
-# ========== OPENAI IMAGE & AUDIO ==========
-def download_media(media_url: str, wassenger_token: str) -> bytes:
-    headers = {"Token": wassenger_token}
-    resp = requests.get(media_url, headers=headers)
-    resp.raise_for_status()
-    return resp.content
-
-def analyze_image_with_gpt4o(image_bytes: bytes, lang='en') -> str:
-    prompt = {
-        'en': "Please describe this image. If it's business- or marketing-related (like a business page, ad, product, or shopfront), provide a short SWOT analysis.",
-        'zh': "请描述这张图片。如果和商业或营销有关（如品牌主页、广告、产品、门店等），请用 SWOT 简要分析。"
-    }[lang]
-    b64_image = base64.b64encode(image_bytes).decode()
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}}
-            ]
-        }
-    ]
-    response = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=messages,
-        api_key=OPENAI_API_KEY,
-        max_tokens=800,
-    )
-    return response.choices[0].message.content.strip()
-
-def transcribe_audio_with_whisper(audio_bytes: bytes, lang_hint='en') -> str:
-    with tempfile.NamedTemporaryFile(suffix=".mp3") as temp_audio:
-        temp_audio.write(audio_bytes)
-        temp_audio.flush()
-        transcript = openai.audio.transcriptions.create(
-            model="whisper-1",
-            file=open(temp_audio.name, "rb"),
-            api_key=OPENAI_API_KEY,
-            language=lang_hint
-        )
-    return transcript.text.strip()
-
-# ========== UTILS ==========
-def detect_language(text: str) -> str:
+def detect_language(text):
     return 'zh' if re.search(r'[\u4e00-\u9fff]', text) else 'en'
 
-def send_whatsapp_reply(to: str, text: str) -> None:
+
+def send_whatsapp_reply(to, text):
     url = "https://api.wassenger.com/v1/messages"
     headers = {"Content-Type": "application/json", "Token": WASSENGER_API_KEY}
-    if (to.isdigit() and len(to) > 15) or (isinstance(to, str) and to.endswith("@g.us")):
-        group_id = to.replace("@g.us", "") if isinstance(to, str) else str(to)
-        payload = {"group": group_id, "message": text, "device": WASSENGER_DEVICE_ID}
-    else:
-        payload = {"phone": to, "message": text, "device": WASSENGER_DEVICE_ID}
+    payload = {"phone": to, "message": text, "device": WASSENGER_DEVICE_ID}
     try:
-        resp = requests.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
+        requests.post(url, json=payload, headers=headers).raise_for_status()
         app.logger.info(f"Sent to {to}: {text}")
     except Exception as e:
         app.logger.error(f"Send error to {to}: {e}")
 
-def send_reply_with_delay(receiver: str, text: str, max_parts: int = 3) -> None:
+def send_reply_with_delay(receiver, text, max_parts=3):
+    """
+    Splits reply into paragraphs, then intelligently merges into <= max_parts.
+    Sends each with 1-second delay.
+    """
     paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+
+    # if too many paragraphs, merge evenly
     if len(paras) > max_parts:
         merged = []
         per_part = len(paras) // max_parts
@@ -256,11 +147,18 @@ def send_reply_with_delay(receiver: str, text: str, max_parts: int = 3) -> None:
             if extra > 0:
                 extra -= 1
         paras = merged
+
     for part in paras:
         send_whatsapp_reply(receiver, part)
         time.sleep(2)
 
-def save_message_to_airtable(sender: str, receiver: str, message: str, role: str) -> None:
+
+def notify_handover(phone, msg):
+    note = f"[Handover] 客户 {phone} 提了预约: {msg}"
+    send_whatsapp_reply(WASSENGER_GROUP_ID, note)
+
+
+def save_message_to_airtable(sender, receiver, message, role):
     data = {
         "fields": {
             "Sender": sender,
@@ -272,10 +170,12 @@ def save_message_to_airtable(sender: str, receiver: str, message: str, role: str
     try:
         resp = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
         resp.raise_for_status()
+        app.logger.info(f"Saved {role} message for {receiver}")
     except Exception as e:
         app.logger.error(f"Failed to save message to Airtable: {e}")
 
-def fetch_last_10_history(receiver: str) -> List[Dict[str, str]]:
+
+def fetch_last_10_history(receiver):
     receiver = receiver.lstrip('+')
     params = {
         "filterByFormula": f"{{Receiver}} = '{receiver}'",
@@ -288,7 +188,7 @@ def fetch_last_10_history(receiver: str) -> List[Dict[str, str]]:
         resp.raise_for_status()
         records = resp.json().get("records", [])
         messages = []
-        for r in reversed(records):
+        for r in reversed(records):  # oldest -> newest
             fields = r.get("fields", {})
             if fields.get("Role") == "user":
                 messages.append({"role": "user", "content": fields.get("Message", "")})
@@ -299,293 +199,106 @@ def fetch_last_10_history(receiver: str) -> List[Dict[str, str]]:
         app.logger.error(f"Failed to fetch history: {e}")
         return []
 
-def ai_extract_context_from_history(history: List[Dict[str, str]]) -> Dict[str, Optional[str]]:
-    convo = ""
-    for m in history:
-        role = "User" if m["role"] == "user" else "Bot"
-        convo += f"{role}: {m['content']}\n"
-    prompt = (
-        "You are a sales assistant. From the following WhatsApp chat history, extract as much information as possible in JSON with these keys:\n"
-        "- name (customer or company name, if given)\n"
-        "- business_link (any social/page link)\n"
-        "- objective (customer's main marketing goal or intent)\n"
-        "If info is missing, use null.\n\n"
-        "If you cannot extract anything, reply with: {\"name\": null, \"business_link\": null, \"objective\": null}\n\n"
-        "Chat history:\n"
-        "===\n"
-        f"{convo}\n"
-        "===\n"
-        "Output only valid JSON."
-    )
-    try:
-        response = claude_client.messages.create(
-            model=CLAUDE_MODEL,
-            system="",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=512
+
+def generate_claude_reply(bot_number, receiver, user_msg):
+    save_message_to_airtable(bot_number, receiver, user_msg, "user")
+
+    messages = fetch_last_10_history(receiver)
+
+    if not messages:
+        lang = detect_language(user_msg)
+        intro = (
+            "Hi there! 👋 I'm Coco from Ventopia's marketing team.\n\n"
+            "Which area are you exploring today? I can help with:\n"
+            "1) E-commerce (Shopee/Lazada)\n"
+            "2) TikTok marketing\n"
+            "3) F&B promotion\n"
+            "4) Social media management\n"
+            "5) Website/Google Ads\n"
+            "6) Store-Visit videos\n"
+            "7) WeChat Commerce platform"
+            if lang == 'en' else
+            "你好！我是 Ventopia 的 Coco，请问你今天想了解哪方面的服务呢？\n\n"
+            "1) 电商\n"
+            "2) TikTok\n"
+            "3) 餐饮\n"
+            "4) 社交媒体\n"
+            "5) 网站/谷歌广告\n"
+            "6) 到店视频\n"
+            "7) 微信商城"
         )
-        reply_text = ''.join(getattr(p, 'text', str(p)) for p in response.content)
-        match = re.search(r'\{[\s\S]+\}', reply_text)
-        if not match:
-            return {"name": None, "business_link": None, "objective": None}
-        return json.loads(match.group(0))
-    except Exception as e:
-        app.logger.error(f"Context extraction failed: {e}")
-        return {"name": None, "business_link": None, "objective": None}
+        save_message_to_airtable(bot_number, receiver, intro, "assistant")
+        send_reply_with_delay(receiver, intro)
+        return
 
-def get_missing_info(context: Dict[str, Optional[str]]) -> List[str]:
-    return [f for f in REQUIRED_FIELDS if not context.get(f)]
-
-def ask_for_missing_info(missing: List[str], lang: str) -> str:
-    prompts = PROMPT_TEMPLATES[lang]
-    return "\n".join([prompts[f] for f in missing])
-
-def clean_reply(response: Any) -> str:
-    text = ''.join(getattr(p, 'text', str(p)) for p in response.content).strip().replace('您', '你')
-    return text
-
-def build_short_context(history: List[Dict[str, str]], n: int = 5) -> List[Dict[str, str]]:
-    return history[-n:]
-
-def send_handover_to_group(context: Dict[str, Any]) -> None:
-    msg = (
-        f"[Handover] 客户: {context.get('name','(未知)')}\n"
-        f"页面: {context.get('business_link','(无链接)')}\n"
-        f"目标: {context.get('objective','(未知)')}\n"
-        f"——请跟进"
-    )
-    send_whatsapp_reply(WASSENGER_GROUP_ID, msg)
-
-# ========== INTENT & AGENT ==========
-class Agent(Enum):
-    MANAGER = "manager"
-    KNOWLEDGE = "knowledge"
-    TOOLS_ANALYSIS = "tools_analysis"
-    TOOLS_HANDOVER = "tools_handover"
-    INFO_VALIDATOR = "info_validator"
-    HUMAN = "human"
-
-def detect_intent(history: List[Dict[str, str]], user_msg: str, lang: str) -> str:
-    chat = ""
-    for m in history[-5:]:
-        role = "User" if m["role"] == "user" else "Bot"
-        chat += f"{role}: {m['content']}\n"
-    sys_prompt = (
-        "You are a sales assistant AI. Based on the chat history and the latest user message, "
-        "identify the main user intent for the next action. Choose from the following list ONLY:\n"
-        "- analyze: User wants a SWOT/marketing/page analysis or review\n"
-        "- booking: User wants to book, make an appointment, or proceed to meeting\n"
-        "- package: User is asking about service packages, solutions, pricing or promotions\n"
-        "- info_collect: User is providing info, or you need to collect name/page/objective\n"
-        "- handover: User requests to speak to human, escalate, or says 'talk to sales' etc\n"
-        "- other: Anything else\n"
-        "Reply with just the intent label (no explanation)."
-    )
-    prompt = f"{chat}\nUser: {user_msg}\nIntent:"
-    response = claude_client.messages.create(
-        model=CLAUDE_MODEL,
-        system=sys_prompt,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=10,
-        temperature=0
-    )
-    text = clean_reply(response).lower()
-    for label in ["analyze", "booking", "package", "info_collect", "handover", "other"]:
-        if label in text:
-            return label
-    return "other"
-
-def manager_ai(user_msg: str, context: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None, lang: str = 'en') -> Agent:
-    intent = detect_intent(history or [], user_msg, lang)
-    if intent == "analyze":
-        return Agent.TOOLS_ANALYSIS
-    elif intent == "booking":
-        return Agent.TOOLS_HANDOVER
-    elif intent == "package":
-        return Agent.KNOWLEDGE
-    elif intent == "info_collect":
-        return Agent.INFO_VALIDATOR
-    elif intent == "handover":
-        return Agent.HUMAN
-    else:
-        return Agent.MANAGER
-
-def spin_fallback(history: List[Dict[str, str]], lang: str) -> str:
-    prompts = {
-        'zh': [
-            "感谢你的消息！请问你现在主要关注哪方面业务？例如电商、社交媒体、网站推广等。",
-        ],
-        'en': [
-            "Thanks for reaching out! Which area are you mainly exploring—e-commerce, social media, website promotion, or something else?",
-        ]
-    }
-    return prompts[lang][0]
-
-def knowledge_ai(history: List[Dict[str, str]], user_msg: str, lang: str) -> str:
-    messages = build_short_context(history, n=5)
     response = claude_client.messages.create(
         model=CLAUDE_MODEL,
         system=SYSTEM_PROMPT,
-        messages=messages + [{'role': 'user', 'content': user_msg}],
-        max_tokens=2048
+        messages=messages,
+        max_tokens=8192
     )
-    return clean_reply(response)
 
-def tools_analysis_ai(user_msg: str, url: str, lang: str, max_retry: int = 1) -> str:
-    retry_count = 0
-    page_data, platform = None, None
-    while retry_count <= max_retry:
-        page_data, platform = get_social_page_summary(url)
-        if page_data:
-            break
-        retry_count += 1
-        time.sleep(1)
-    if not page_data:
-        return "We are unable to automatically analyze this platform right now. We can arrange for a consultant to meet with you for a detailed review." if lang == "en" else "这个平台目前暂时无法自动分析页面内容，我们可以安排顾问与您会面，做详细分析。"
-    prompt = (
-        f"Here is the {platform} page info:\n"
-        f"Name: {page_data.get('name')}\n"
-        f"Likes/Followers: {page_data.get('likes') or page_data.get('followers')}\n"
-        f"Description: {page_data.get('bio')}\n"
-        f"Recent posts: {page_data.get('recent_posts')}\n\n"
-        f"Please analyze this page for marketing strengths, weaknesses, and suggestions. Reply in {'Chinese' if lang == 'zh' else 'English'}."
-    )
-    response = claude_client.messages.create(
-        model=CLAUDE_MODEL,
-        system=SYSTEM_PROMPT,
-        messages=[{'role': 'user', 'content': prompt}],
-        max_tokens=1024
-    )
-    analysis = clean_reply(response)
-    if not analysis or len(analysis) < 30 or "无法分析" in analysis or "arrange" in analysis.lower():
-        return "We are unable to analyze this page in detail. We can arrange for a consultant to assist you." if lang == "en" else "这个页面信息无法完整分析，我们可以安排顾问与您会面，做详细分析。"
-    return analysis
+    reply = ''.join(getattr(p, 'text', str(p)) for p in response.content).strip().replace('您', '你')
+    save_message_to_airtable(bot_number, receiver, reply, "assistant")
+    send_reply_with_delay(receiver, reply)
 
-def tools_handover_ai(context: Dict[str, Any]) -> str:
-    send_handover_to_group(context)
-    return "Our consultant will contact you soon." if context.get('lang') == 'en' else "已为你安排顾问跟进，请稍等。"
 
-def info_validator_ai(context: Dict[str, Any], lang: str) -> Optional[str]:
-    missing = get_missing_info(context)
-    return ask_for_missing_info(missing, lang) if missing else None
-
-# ========== MAIN WEBHOOK ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
     payload = request.get_json(force=True) or {}
+    app.logger.debug(f"Incoming payload: {payload}")
     if payload.get('event') != 'message:in:new':
         return jsonify({'status': 'ignored'}), 200
+
     data = payload.get('data', {})
+    if data.get('meta', {}).get('isGroup'):
+        return jsonify({'status': 'group_ignored'}), 200
+
     receiver = (data.get('fromNumber') or data.get('from', '').split('@')[0]).lstrip('+')
-    msg, lang = None, 'en'
-
-    # IMAGE
-    if data.get('type') == 'image' and data.get('media', {}).get('links', {}).get('download'):
-        img_url = "https://api.wassenger.com" + data['media']['links']['download']
-        image_bytes = download_media(img_url, WASSENGER_API_KEY)
-        lang = detect_language(data.get('caption', '') or '')
-        img_analysis = analyze_image_with_gpt4o(image_bytes, lang)
-        save_message_to_airtable(receiver, receiver, "[图片分析] " + img_analysis, "user")
-        msg = img_analysis
-    # VOICE
-    elif data.get('type') == 'voice' and data.get('media', {}).get('links', {}).get('download'):
-        audio_url = "https://api.wassenger.com" + data['media']['links']['download']
-        audio_bytes = download_media(audio_url, WASSENGER_API_KEY)
-        lang = detect_language(data.get('caption', '') or '')
-        transcript = transcribe_audio_with_whisper(audio_bytes, lang)
-        save_message_to_airtable(receiver, receiver, "[语音转文字] " + transcript, "user")
-        msg = transcript
-    # TEXT
-    elif data.get('type') == 'text' and data.get('body'):
-        msg = data.get('body', '').strip()
-        lang = detect_language(msg)
-        # ---- Quoted (reply-to) message handling for vague replies ----
-        vague_replies = ["this", "that", "the above", "refer above", "above", "see above", "link", "page"]
-        if (
-            msg.lower() in vague_replies
-            and "quoted" in data
-            and data["quoted"].get("body")
-        ):
-            quoted_body = data["quoted"]["body"].strip()
-            if quoted_body:
-                msg = quoted_body
-                app.logger.info(f"Vague reply detected, replaced msg with quoted message: {msg}")
-    else:
-        if data.get('type') == 'sticker':
-            send_whatsapp_reply(receiver, "收到你的贴纸啦~ 有什么需要帮忙的吗？")
-        elif data.get('type') == 'image':
-            send_whatsapp_reply(receiver, "收到你的图片！系统会自动分析并回复。")
-        elif data.get('type') == 'voice':
-            send_whatsapp_reply(receiver, "收到你的语音！系统会自动转文字并分析。")
-        return jsonify({'status': 'ignored_non_text'}), 200
-
+    msg = data.get('body', '').strip()
     if not receiver or not msg:
         return jsonify({'status': 'ignored'}), 200
 
-    bot_number = WASSENGER_DEVICE_ID
-    save_message_to_airtable(bot_number, receiver, msg, "user")
-    history = fetch_last_10_history(receiver)
-    context = ai_extract_context_from_history(history)
-    context['lang'] = lang
+    try:
+        if any(k.lower() in msg.lower() for k in BOOKING_KEYWORDS):
+            notify_handover(receiver, msg)
+            ack = ('好的，马上帮你转接，请稍等~' if detect_language(msg) == 'zh' else 'Sure, connecting you now.')
+            send_reply_with_delay(receiver, ack)
+            return jsonify({'status': 'handover'}), 200
 
-    agent = manager_ai(msg, context, history, lang)
+        if URL_PATTERN.search(msg):
+            link = URL_PATTERN.search(msg).group()
+            lang = detect_language(msg)
+            analysis_prompt = (
+                f"请根据SWOT分析这个网站：{link}，并给出简要概述。" if lang == 'zh' else
+                f"Please analyze this website: {link} based on the SWOT framework and provide a brief summary."
+            )
+            resp = claude_client.messages.create(
+                model=CLAUDE_MODEL,
+                system=SYSTEM_PROMPT,
+                messages=[{'role': 'user', 'content': analysis_prompt}],
+                max_tokens=8192
+            )
+            text = ''.join(getattr(p, 'text', str(p)) for p in resp.content).strip().replace('您', '你')
+            send_reply_with_delay(receiver, text)
+            ask = ('现在在用哪些平台做推广？' if lang == 'zh' else 'Which platforms are you currently using?')
+            send_reply_with_delay(receiver, ask)
+            return jsonify({'status': 'ok'}), 200
 
-    # PAGE ANALYSIS ON INFO COMPLETE
-    if agent == Agent.INFO_VALIDATOR:
-        reply = info_validator_ai(context, lang)
-        if not reply:
-            social_link = context.get("business_link")
-            if social_link and ("facebook.com" in social_link or "instagram.com" in social_link):
-                reply = tools_analysis_ai(msg, social_link, lang, max_retry=1)
-                if "顾问" in reply or "consultant" in reply.lower():
-                    send_handover_to_group(context)
-            else:
-                reply = tools_handover_ai(context)
-    elif agent == Agent.TOOLS_ANALYSIS:
-        match = URL_PATTERN.search(msg)
-        url = None
-        if match:
-            url = match.group()
-        else:
-            for m in reversed(history):
-                if m['role'] == 'user':
-                    m_link = URL_PATTERN.search(m['content'])
-                    if m_link:
-                        url = m_link.group()
-                        break
-        if url:
-            reply = tools_analysis_ai(msg, url, lang, max_retry=1)
-            if "顾问" in reply or "consultant" in reply.lower():
-                send_handover_to_group(context)
-        else:
-            reply = "请提供要分析的页面链接。" if lang == "zh" else "Please provide the page link you want to analyze."
-    elif agent == Agent.KNOWLEDGE:
-        reply = knowledge_ai(history, msg, lang)
-    elif agent == Agent.INFO_VALIDATOR:
-        reply = info_validator_ai(context, lang)
-        if not reply:
-            reply = tools_handover_ai(context)
-    elif agent == Agent.TOOLS_HANDOVER:
-        reply = tools_handover_ai(context)
-    elif agent == Agent.HUMAN:
-        send_handover_to_group(context)
-        reply = "Our consultant will contact you soon." if lang == "en" else "已为你安排顾问跟进，请稍等。"
-    elif agent == Agent.MANAGER:
-        reply = spin_fallback(history, lang)
-    else:
-        reply = knowledge_ai(history, msg, lang)
+        bot_number = WASSENGER_DEVICE_ID
+        generate_claude_reply(bot_number, receiver, msg)
+        return jsonify({'status': 'ok'}), 200
 
-    if not reply or reply.strip().lower() in ["i down", "down", "downdowndown", "", None]:
-        reply = "我稍后回复你" if lang == "zh" else "I will reply to you shortly."
+    except Exception as e:
+        app.logger.exception(f"Webhook error: {e}")
+        return jsonify({'status': 'error', 'reason': str(e)}), 500
 
-    save_message_to_airtable(bot_number, receiver, reply, "assistant")
-    send_reply_with_delay(receiver, reply)
-    return jsonify({'status': 'ok'}), 200
 
 @app.route('/', methods=['GET'])
 @app.route('/health', methods=['GET'])
 def health_check():
     return 'OK', 200
+
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
